@@ -6,6 +6,9 @@ export const metadata: Metadata = {
   title: "Traxly",
   description:
     "A lightweight project planning workspace for dependency-driven scheduling and LLM-ready exports.",
+  icons: {
+    icon: "/icon",
+  },
 };
 
 export default function RootLayout({
