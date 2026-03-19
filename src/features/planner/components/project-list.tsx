@@ -7,7 +7,6 @@ import { ArrowSquareOut, Copy, MagnifyingGlass, Trash } from "@phosphor-icons/re
 
 import type { Project } from "@/domain/planner";
 import { WorkspaceSidebar } from "@/features/planner/components/workspace-sidebar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DialogBody,
@@ -126,14 +125,13 @@ export function ProjectList({ initialProjects }: Props) {
   return (
     <>
       <div className="flex min-h-screen bg-background">
-        <WorkspaceSidebar projects={projects} onCreateProject={() => setCreateOpen(true)} />
+        <WorkspaceSidebar projects={projects} />
 
         <main className="flex min-h-screen flex-1 flex-col overflow-hidden">
           <header className="border-b border-border/70 bg-background/95 px-8 py-6 backdrop-blur">
             <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">Workspace</p>
-                <h1 className="mt-2 text-3xl font-semibold tracking-tight">Projects</h1>
+                <h1 className="text-3xl font-semibold tracking-tight">Projects</h1>
                 <p className="mt-2 text-sm text-muted-foreground">
                   Open a project, start from a blank plan, or duplicate an existing project into a reusable template copy.
                 </p>
@@ -159,13 +157,6 @@ export function ProjectList({ initialProjects }: Props) {
           </header>
 
           <section className="flex-1 overflow-y-auto px-8 py-8">
-            <div className="mb-5 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Badge variant="outline">{filteredProjects.length} visible</Badge>
-                <Badge variant="secondary">Personal workspace</Badge>
-              </div>
-            </div>
-
             <div className="overflow-hidden rounded-3xl border border-border/70 bg-card shadow-sm">
               <div className="grid grid-cols-[minmax(260px,1.2fr)_minmax(280px,1fr)_160px] border-b border-border/70 bg-muted/35 px-5 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 <span>Project</span>

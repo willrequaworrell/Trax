@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import {
+  ArrowsInLineHorizontal,
+  ArrowsOutLineVertical,
   CaretDown,
   CaretRight,
   DownloadSimple,
@@ -859,9 +861,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </TooltipProvider>
               ) : null}
             </div>
-            <p className="truncate text-xs text-muted-foreground">
-              {task.type === "summary" ? "Section rollup" : task.notes || `${task.rolledUpEffortDays} business day effort`}
-            </p>
+            {task.type === "summary" ? (
+              task.notes ? <p className="truncate text-xs text-muted-foreground">{task.notes}</p> : null
+            ) : (
+              <p className="truncate text-xs text-muted-foreground">{task.notes || `${task.rolledUpEffortDays} business day effort`}</p>
+            )}
           </div>
         </div>
 
@@ -1003,25 +1007,34 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const hasTasks = rootTasks.length > 0;
   const canZoomOut = ganttColumnWidth - GANTT_ZOOM_STEP >= minGanttColumnWidth - 0.1;
   const canZoomIn = ganttColumnWidth + GANTT_ZOOM_STEP <= GANTT_MAX_COLUMN_WIDTH + 0.1;
+  const expandableTaskIds = useMemo(
+    () => plan.tasks.filter((task) => task.hasChildren).map((task) => task.id),
+    [plan.tasks],
+  );
+
+  function setAllExpanded(nextExpanded: boolean) {
+    setExpandedMap((current) => {
+      const next = { ...current };
+
+      for (const taskId of expandableTaskIds) {
+        next[taskId] = nextExpanded;
+      }
+
+      return next;
+    });
+  }
 
   return (
     <div className="flex min-h-screen bg-background">
-      <WorkspaceSidebar
-        projects={projects}
-        activeProjectId={plan.project.id}
-        onCreateProject={() => (window.location.href = "/")}
-      />
+      <WorkspaceSidebar projects={projects} activeProjectId={plan.project.id} />
 
       <main className="flex min-h-screen flex-1 flex-col overflow-hidden">
         <header className="border-b border-border/70 bg-background/95 px-8 pt-6 pb-4 backdrop-blur">
           <div className="flex flex-col gap-5">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Project / Planner / {plan.project.name}</p>
-                <div className="mt-2 flex items-center gap-3">
+                <div className="flex items-center gap-3">
                   <h1 className="text-3xl font-semibold tracking-tight">{plan.project.name}</h1>
-                  <Badge variant="outline">{plan.tasks.length} tasks</Badge>
-                  <Badge variant="secondary">{plan.dependencies.length} dependencies</Badge>
                   <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
                   {plan.issues.length > 0 ? <Badge variant="warning">{plan.issues.length} issues</Badge> : null}
                 </div>
@@ -1092,6 +1105,18 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   />
                 </InputGroup>
                 <div className="flex items-center gap-2">
+                  {hasTasks ? (
+                    <>
+                      <Button variant="outline" onClick={() => setAllExpanded(true)}>
+                        <ArrowsOutLineVertical />
+                        Expand all
+                      </Button>
+                      <Button variant="outline" onClick={() => setAllExpanded(false)}>
+                        <ArrowsInLineHorizontal />
+                        Collapse all
+                      </Button>
+                    </>
+                  ) : null}
                   <Button variant={statusFilter === "all" ? "default" : "outline"} onClick={() => setStatusFilter("all")}>
                     All
                   </Button>
