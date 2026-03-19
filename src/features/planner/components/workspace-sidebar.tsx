@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CalendarDots, ChartBarHorizontal, Folders, ListBullets, Plus, Sparkle } from "@phosphor-icons/react";
+import { useTransition } from "react";
+import { CalendarDots, ChartBarHorizontal, Folders, ListBullets, Plus, SignOut, Sparkle } from "@phosphor-icons/react";
+import { signOut } from "next-auth/react";
 
 import type { Project } from "@/domain/planner";
 import { Button } from "@/components/ui/button";
@@ -25,6 +27,13 @@ type Props = {
 
 export function WorkspaceSidebar({ projects, activeProjectId, onCreateProject }: Props) {
   const pathname = usePathname();
+  const [isSigningOut, startSignOutTransition] = useTransition();
+
+  function handleSignOut() {
+    startSignOutTransition(async () => {
+      await signOut({ redirectTo: "/" });
+    });
+  }
 
   return (
     <Sidebar className="h-screen">
@@ -34,7 +43,7 @@ export function WorkspaceSidebar({ projects, activeProjectId, onCreateProject }:
             <Sparkle className="size-5" />
           </div>
           <div>
-            <p className="text-sm font-semibold">Trax</p>
+            <p className="text-sm font-semibold">Traxly</p>
             <p className="text-xs text-sidebar-foreground/60">Personal planning workspace</p>
           </div>
         </div>
@@ -87,6 +96,10 @@ export function WorkspaceSidebar({ projects, activeProjectId, onCreateProject }:
       </SidebarContent>
 
       <SidebarFooter>
+        <Button variant="outline" className="w-full justify-center" onClick={() => void handleSignOut()} disabled={isSigningOut}>
+          <SignOut className="size-4" />
+          {isSigningOut ? "Signing out..." : "Log out"}
+        </Button>
         <p className="text-xs text-sidebar-foreground/60">Use the list for quick schedule updates and open dialogs for section details, notes, and full dependency editing.</p>
       </SidebarFooter>
     </Sidebar>

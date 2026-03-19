@@ -1,5 +1,6 @@
 import { createDependency } from "@/server/services/project-service";
-import { jsonError, jsonOk, readJson } from "@/server/http";
+import { jsonError, jsonOk, jsonServiceError, readJson } from "@/server/http";
+import { requireApiSession } from "@/server/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +9,7 @@ type Context = { params: Promise<{ projectId: string }> };
 
 export async function POST(request: Request, context: Context) {
   try {
+    await requireApiSession();
     const { projectId } = await context.params;
     const payload = await readJson<{
       predecessorTaskId: string;
@@ -21,6 +23,6 @@ export async function POST(request: Request, context: Context) {
     });
     return plan ? jsonOk(plan, { status: 201 }) : jsonError("Project not found.", 404);
   } catch (error) {
-    return jsonError(error instanceof Error ? error.message : "Failed to create dependency.");
+    return jsonServiceError(error, "Failed to create dependency.");
   }
 }

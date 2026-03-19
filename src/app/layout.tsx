@@ -3,7 +3,7 @@ import "./globals.css";
 import { Sonner } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
-  title: "Trax",
+  title: "Traxly",
   description:
     "A lightweight project planning workspace for dependency-driven scheduling and LLM-ready exports.",
 };

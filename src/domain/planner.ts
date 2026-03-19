@@ -65,6 +65,7 @@ export const taskCreateSchema = z.object({
   name: z.string().min(1).max(160),
   notes: z.string().max(4000).optional(),
   type: z.enum(taskTypes).default("task"),
+  plannedMode: z.enum(plannedModes).nullable().optional(),
   plannedStart: z.string().nullable().optional(),
   plannedEnd: z.string().nullable().optional(),
   plannedDurationDays: z.number().int().min(0).nullable().optional(),

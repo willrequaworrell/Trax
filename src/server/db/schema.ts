@@ -1,7 +1,7 @@
 import { relations } from "drizzle-orm";
-import { type AnySQLiteColumn, index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { type AnyPgColumn, boolean, index, integer, pgTable, text } from "drizzle-orm/pg-core";
 
-export const projects = sqliteTable("projects", {
+export const projects = pgTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
@@ -9,14 +9,14 @@ export const projects = sqliteTable("projects", {
   updatedAt: text("updated_at").notNull(),
 });
 
-export const tasks = sqliteTable(
+export const tasks = pgTable(
   "tasks",
   {
     id: text("id").primaryKey(),
     projectId: text("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    parentId: text("parent_id").references((): AnySQLiteColumn => tasks.id, { onDelete: "cascade" }),
+    parentId: text("parent_id").references((): AnyPgColumn => tasks.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     notes: text("notes").notNull().default(""),
     sortOrder: integer("sort_order").notNull().default(0),
@@ -29,7 +29,7 @@ export const tasks = sqliteTable(
     actualEnd: text("actual_end"),
     status: text("status").notNull().default("not_started"),
     percentComplete: integer("percent_complete").notNull().default(0),
-    isExpanded: integer("is_expanded", { mode: "boolean" }).notNull().default(true),
+    isExpanded: boolean("is_expanded").notNull().default(true),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -39,7 +39,7 @@ export const tasks = sqliteTable(
   }),
 );
 
-export const dependencies = sqliteTable(
+export const dependencies = pgTable(
   "dependencies",
   {
     id: text("id").primaryKey(),

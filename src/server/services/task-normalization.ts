@@ -27,13 +27,6 @@ export function findTaskNormalizationUpdates(tasks: Task[]) {
       values: Partial<Task>;
     }> = [];
 
-    if (task.type === "summary" && task.parentId !== null) {
-      updates.push({
-        id: task.id,
-        values: { parentId: null },
-      });
-    }
-
     const normalizedStatus = normalizeStoredTaskStatus(task);
     if (normalizedStatus !== task.status) {
       updates.push({

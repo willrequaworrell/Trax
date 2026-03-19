@@ -34,7 +34,7 @@ function ContextMenuItem({
   return (
     <ContextMenu.Item
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-xl px-2.5 py-2 text-sm outline-none transition hover:bg-muted focus:bg-muted data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 text-sm outline-none transition hover:bg-muted focus:bg-muted data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         inset && "pl-8",
         className,
       )}
@@ -53,7 +53,7 @@ function ContextMenuCheckboxItem({
     <ContextMenu.CheckboxItem
       checked={checked}
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-xl py-2 pr-2 pl-8 text-sm outline-none transition hover:bg-muted focus:bg-muted data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex cursor-pointer items-center gap-2 rounded-xl py-2 pr-2 pl-8 text-sm outline-none transition hover:bg-muted focus:bg-muted data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         className,
       )}
       {...props}
@@ -94,7 +94,7 @@ function ContextMenuSubTrigger({
   return (
     <ContextMenu.SubTrigger
       className={cn(
-        "flex cursor-default items-center rounded-xl px-2.5 py-2 text-sm outline-none hover:bg-muted focus:bg-muted data-[state=open]:bg-muted",
+        "flex cursor-pointer items-center rounded-xl px-2.5 py-2 text-sm outline-none hover:bg-muted focus:bg-muted data-[state=open]:bg-muted",
         inset && "pl-8",
         className,
       )}

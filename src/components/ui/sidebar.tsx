@@ -46,7 +46,7 @@ function SidebarItem({
   return (
     <Comp
       className={cn(
-        "flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-sm text-left transition hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        "flex w-full cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 text-sm text-left transition hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
         active && "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm",
         className,
       )}

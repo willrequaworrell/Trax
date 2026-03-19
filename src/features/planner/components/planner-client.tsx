@@ -224,7 +224,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [pendingTaskIds, setPendingTaskIds] = useState<Record<string, boolean>>({});
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
   const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
-  const [toolbarPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
 
   const taskMap = useMemo(() => new Map(plan.tasks.map((task) => [task.id, task])), [plan.tasks]);
@@ -415,7 +415,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
   function cellButtonClass(taskId: string, field: EditableField) {
     return cn(
-      "group w-full rounded-2xl px-2 py-2 text-left transition",
+      "group w-full cursor-pointer rounded-2xl px-2 py-2 text-left transition",
       "hover:bg-muted/45 hover:ring-1 hover:ring-border/70",
       isCellActive(taskId, field) && "bg-muted/55 ring-1 ring-border/70",
     );
@@ -492,21 +492,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to copy export.");
     }
-  }
-
-  async function refreshProject() {
-    startTransition(async () => {
-      try {
-        const nextPlan = await requestPlan(`/api/projects/${plan.project.id}`);
-
-        if (nextPlan) {
-          applyPlan(nextPlan);
-          toast.success("Planner refreshed");
-        }
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to refresh project.");
-      }
-    });
   }
 
   async function toggleDependency(task: PlannedTask, predecessorTaskId: string, checked: boolean) {
@@ -833,8 +818,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       >
         <div className="flex min-w-0 items-center gap-2" style={{ paddingLeft: `${depth * 18}px` }}>
           {task.hasChildren ? (
-            <button
-              className="inline-flex size-7 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
+              <button
+              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
               onClick={(event) => {
                 event.stopPropagation();
                 void toggleTask(task.id);
@@ -849,7 +834,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             <div className="flex items-center gap-2">
               <button
                 className={cn(
-                  "truncate text-left font-medium transition hover:text-primary",
+                  "cursor-pointer truncate text-left font-medium transition hover:text-primary",
                   isSummaryRow && "uppercase tracking-wide",
                 )}
                 onClick={(event) => {
@@ -946,7 +931,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
           >
             {task.hasChildren ? (
               <button
-                className="inline-flex size-7 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
+                className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
                 onClick={(event) => {
                   event.stopPropagation();
                   void toggleTask(task.id);
@@ -960,7 +945,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             <div className="min-w-0">
               <button
                 className={cn(
-                  "truncate text-left font-medium transition hover:text-primary",
+                  "cursor-pointer truncate text-left font-medium transition hover:text-primary",
                   task.isSummary && "uppercase tracking-wide",
                 )}
                 onClick={(event) => {
@@ -1043,10 +1028,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button variant="outline" onClick={() => void refreshProject()}>
-                  {toolbarPending ? <Spinner /> : null}
-                  Refresh
-                </Button>
                 <DropdownMenuRoot>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline">

@@ -1,15 +1,22 @@
 import { createProject, listProjects } from "@/server/services/project-service";
-import { jsonError, jsonOk, readJson } from "@/server/http";
+import { jsonOk, jsonServiceError, readJson } from "@/server/http";
+import { requireApiSession } from "@/server/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return jsonOk(await listProjects());
+  try {
+    await requireApiSession();
+    return jsonOk(await listProjects());
+  } catch (error) {
+    return jsonServiceError(error, "Failed to load projects.");
+  }
 }
 
 export async function POST(request: Request) {
   try {
+    await requireApiSession();
     const payload = await readJson<{ name: string; description?: string }>(request);
     const plan = await createProject({
       ...payload,
@@ -17,6 +24,6 @@ export async function POST(request: Request) {
     });
     return jsonOk(plan, { status: 201 });
   } catch (error) {
-    return jsonError(error instanceof Error ? error.message : "Failed to create project.");
+    return jsonServiceError(error, "Failed to create project.");
   }
 }

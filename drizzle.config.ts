@@ -1,10 +1,12 @@
+import "dotenv/config";
+
 import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
   schema: "./src/server/db/schema.ts",
   out: "./drizzle",
-  dialect: "sqlite",
+  dialect: "postgresql",
   dbCredentials: {
-    url: "./data/trax.db",
+    url: process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/traxly",
   },
 });

@@ -1,7 +1,7 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or } from "drizzle-orm";
 
 import type { Dependency, Project, Task } from "@/domain/planner";
-import { db } from "@/server/db/client";
+import { getDb } from "@/server/db/client";
 import { dependencies, projects, tasks } from "@/server/db/schema";
 import {
   mapDependencyRow,
@@ -14,11 +14,13 @@ import {
 
 export class ProjectRepository {
   async listProjects() {
+    const db = await getDb();
     const rows = await db.select().from(projects).orderBy(asc(projects.updatedAt));
     return rows.map(mapProjectRow);
   }
 
   async getProject(projectId: string) {
+    const db = await getDb();
     const row = await db.query.projects.findFirst({
       where: eq(projects.id, projectId),
     });
@@ -27,6 +29,7 @@ export class ProjectRepository {
   }
 
   async getProjectSnapshot(projectId: string) {
+    const db = await getDb();
     const project = await this.getProject(projectId);
 
     if (!project) {
@@ -52,11 +55,13 @@ export class ProjectRepository {
   }
 
   async insertProject(project: Project) {
+    const db = await getDb();
     await db.insert(projects).values(toProjectInsert(project));
     return project;
   }
 
   async updateProject(projectId: string, values: Partial<Project>) {
+    const db = await getDb();
     await db
       .update(projects)
       .set({
@@ -68,6 +73,7 @@ export class ProjectRepository {
   }
 
   async deleteProject(projectId: string) {
+    const db = await getDb();
     await db.delete(projects).where(eq(projects.id, projectId));
   }
 
@@ -76,6 +82,7 @@ export class ProjectRepository {
       return;
     }
 
+    const db = await getDb();
     await db.insert(tasks).values(taskList.map(toTaskInsert));
   }
 
@@ -84,10 +91,12 @@ export class ProjectRepository {
       return;
     }
 
+    const db = await getDb();
     await db.insert(dependencies).values(dependencyList.map(toDependencyInsert));
   }
 
   async getTask(taskId: string) {
+    const db = await getDb();
     const row = await db.query.tasks.findFirst({
       where: eq(tasks.id, taskId),
     });
@@ -96,11 +105,13 @@ export class ProjectRepository {
   }
 
   async createTask(task: Task) {
+    const db = await getDb();
     await db.insert(tasks).values(toTaskInsert(task));
     return task;
   }
 
   async updateTask(taskId: string, values: Partial<Task>) {
+    const db = await getDb();
     await db
       .update(tasks)
       .set({
@@ -124,6 +135,7 @@ export class ProjectRepository {
   }
 
   async deleteTask(taskId: string) {
+    const db = await getDb();
     const task = await this.getTask(taskId);
 
     if (!task) {
@@ -173,7 +185,10 @@ export class ProjectRepository {
       .where(
         and(
           eq(dependencies.projectId, task.projectId),
-          sql`${dependencies.predecessorTaskId} in ${ids} or ${dependencies.successorTaskId} in ${ids}`,
+          or(
+            inArray(dependencies.predecessorTaskId, ids),
+            inArray(dependencies.successorTaskId, ids),
+          ),
         ),
       );
     await db.delete(tasks).where(inArray(tasks.id, ids));
@@ -182,6 +197,7 @@ export class ProjectRepository {
   }
 
   async getDependency(dependencyId: string) {
+    const db = await getDb();
     const row = await db.query.dependencies.findFirst({
       where: eq(dependencies.id, dependencyId),
     });
@@ -190,11 +206,13 @@ export class ProjectRepository {
   }
 
   async createDependency(dependency: Dependency) {
+    const db = await getDb();
     await db.insert(dependencies).values(toDependencyInsert(dependency));
     return dependency;
   }
 
   async updateDependency(dependencyId: string, values: Partial<Dependency>) {
+    const db = await getDb();
     await db
       .update(dependencies)
       .set({
@@ -208,6 +226,7 @@ export class ProjectRepository {
   }
 
   async deleteDependency(dependencyId: string) {
+    const db = await getDb();
     const dependency = await this.getDependency(dependencyId);
 
     if (!dependency) {

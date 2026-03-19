@@ -1,36 +1,60 @@
-import fs from "node:fs";
 import path from "node:path";
 
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { neon } from "@neondatabase/serverless";
+import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
 
 import * as schema from "@/server/db/schema";
 
-const dataDirectory = path.join(process.cwd(), "data");
-const dbPath = path.join(dataDirectory, "trax.db");
+export type AppDatabase = NeonHttpDatabase<typeof schema>;
 
 declare global {
-  var __traxDb: ReturnType<typeof drizzle<typeof schema>> | undefined;
-  var __traxSqlite: InstanceType<typeof Database> | undefined;
+  var __traxlyDb: Promise<AppDatabase> | undefined;
+  var __traxlyDbKey: string | undefined;
 }
 
-function ensureDatabase() {
-  fs.mkdirSync(dataDirectory, { recursive: true });
+function getDatabaseUrl() {
+  const databaseUrl = process.env.DATABASE_URL;
 
-  if (!globalThis.__traxSqlite) {
-    const sqlite = new Database(dbPath);
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    globalThis.__traxSqlite = sqlite;
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL must be set before the server starts.");
   }
 
-  if (!globalThis.__traxDb) {
-    globalThis.__traxDb = drizzle(globalThis.__traxSqlite, { schema });
-    migrate(globalThis.__traxDb, { migrationsFolder: path.join(process.cwd(), "drizzle") });
-  }
-
-  return globalThis.__traxDb;
+  return databaseUrl;
 }
 
-export const db = ensureDatabase();
+async function createTestDatabase(databaseUrl: string) {
+  const dataDir = databaseUrl === "pglite://memory" ? undefined : databaseUrl.replace(/^pglite:\/\//, "");
+  const [{ PGlite }, { drizzle }, { migrate }] = await Promise.all([
+    import("@electric-sql/pglite"),
+    import("drizzle-orm/pglite"),
+    import("drizzle-orm/pglite/migrator"),
+  ]);
+  const client = new PGlite(dataDir);
+  const database = drizzle(client, { schema });
+
+  await migrate(database, {
+    migrationsFolder: path.join(process.cwd(), "drizzle"),
+  });
+
+  return database as unknown as AppDatabase;
+}
+
+async function createDatabase(databaseUrl: string) {
+  if (databaseUrl.startsWith("pglite://")) {
+    return createTestDatabase(databaseUrl);
+  }
+
+  const sql = neon(databaseUrl);
+  return drizzleNeon(sql, { schema });
+}
+
+export async function getDb() {
+  const databaseUrl = getDatabaseUrl();
+
+  if (!globalThis.__traxlyDb || globalThis.__traxlyDbKey !== databaseUrl) {
+    globalThis.__traxlyDbKey = databaseUrl;
+    globalThis.__traxlyDb = createDatabase(databaseUrl);
+  }
+
+  return globalThis.__traxlyDb;
+}

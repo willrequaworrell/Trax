@@ -39,7 +39,7 @@ test("normalizes not-started tasks with progress into in-progress", () => {
   assert.equal(normalized, "in_progress");
 });
 
-test("finds top-level summary fixes and status fixes", () => {
+test("finds status fixes without rewriting hierarchy", () => {
   const updates = findTaskNormalizationUpdates([
     makeTask({
       id: "summary_1",
@@ -58,10 +58,7 @@ test("finds top-level summary fixes and status fixes", () => {
     }),
   ]);
 
-  assert.equal(
-    updates.some((update) => update.id === "summary_1" && update.values.parentId === null),
-    true,
-  );
+  assert.equal(updates.some((update) => update.id === "summary_1"), false);
   assert.equal(
     updates.some((update) => update.id === "task_2" && update.values.status === "in_progress"),
     true,
