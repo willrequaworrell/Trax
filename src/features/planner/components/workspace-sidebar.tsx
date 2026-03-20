@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { CaretDown, CaretRight, Kanban, Plus, SignOut } from "@phosphor-icons/react";
+import { CaretDown, CaretLeft, CaretRight, Kanban, Plus, SignOut } from "@phosphor-icons/react";
 import { signOut } from "next-auth/react";
 
 import type { Project } from "@/domain/planner";
@@ -37,6 +37,7 @@ export function WorkspaceSidebar({ projects, activeProjectId }: Props) {
   const pathname = usePathname();
   const [isSigningOut, startSignOutTransition] = useTransition();
   const [isCreatingProject, startCreateTransition] = useTransition();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
@@ -77,60 +78,104 @@ export function WorkspaceSidebar({ projects, activeProjectId }: Props) {
 
   return (
     <>
-      <Sidebar className="h-screen">
+      <Sidebar className={sidebarOpen ? "h-screen" : "h-screen w-16"}>
         <SidebarHeader className="space-y-4">
-          <div className="flex items-center gap-3 px-2">
+          <div className={sidebarOpen ? "flex items-center gap-3 px-2" : "flex items-center justify-center"}>
             <div className="flex size-10 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
               <Kanban className="size-5" />
             </div>
-            <p className="text-lg font-semibold tracking-tight">Traxly</p>
+            {sidebarOpen ? <p className="text-lg font-semibold tracking-tight">Traxly</p> : null}
+          </div>
+          <div className={sidebarOpen ? "flex justify-end" : "flex justify-center"}>
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              onClick={() => setSidebarOpen((current) => !current)}
+            >
+              {sidebarOpen ? <CaretLeft className="size-3.5" /> : <CaretRight className="size-3.5" />}
+            </Button>
           </div>
         </SidebarHeader>
 
-        <SidebarContent>
-          <CollapsibleRoot open={projectsOpen}>
-            <div className="space-y-2">
-              <div className="flex items-center gap-1 border-b border-sidebar-border/80 px-1 pb-2">
-                <SidebarItem asChild active={pathname === "/"} className="flex-1 font-semibold">
-                  <Link href="/">Projects</Link>
-                </SidebarItem>
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label="Add project"
-                  onClick={() => setCreateOpen(true)}
-                >
-                  <Plus className="size-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label={projectsOpen ? "Collapse project list" : "Expand project list"}
-                  onClick={() => setProjectsOpen((current) => !current)}
-                >
-                  {projectsOpen ? <CaretDown className="size-3.5" /> : <CaretRight className="size-3.5" />}
-                </Button>
-              </div>
-
-              <CollapsibleContent className="space-y-1 pl-5 pr-1">
-                {projects.map((project) => (
-                  <SidebarItem key={project.id} asChild active={project.id === activeProjectId}>
-                    <Link href={`/projects/${project.id}`} className="truncate">
-                      {project.name}
-                    </Link>
+        <SidebarContent className={sidebarOpen ? undefined : "px-2"}>
+          {sidebarOpen ? (
+            <CollapsibleRoot open={projectsOpen}>
+              <div className="space-y-2">
+                <div className="flex items-center gap-1 border-b border-sidebar-border/80 px-1 pb-2">
+                  <SidebarItem asChild active={pathname === "/"} className="flex-1 font-semibold">
+                    <Link href="/">Projects</Link>
                   </SidebarItem>
-                ))}
-              </CollapsibleContent>
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label="Add project"
+                    onClick={() => setCreateOpen(true)}
+                  >
+                    <Plus className="size-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label={projectsOpen ? "Collapse project list" : "Expand project list"}
+                    onClick={() => setProjectsOpen((current) => !current)}
+                  >
+                    {projectsOpen ? <CaretDown className="size-3.5" /> : <CaretRight className="size-3.5" />}
+                  </Button>
+                </div>
+
+                <CollapsibleContent className="space-y-1 pl-5 pr-1">
+                  {projects.map((project) => (
+                    <SidebarItem key={project.id} asChild active={project.id === activeProjectId}>
+                      <Link href={`/projects/${project.id}`} className="truncate">
+                        {project.name}
+                      </Link>
+                    </SidebarItem>
+                  ))}
+                </CollapsibleContent>
+              </div>
+            </CollapsibleRoot>
+          ) : (
+            <div className="space-y-2">
+              <Button
+                type="button"
+                size="icon-sm"
+                variant={pathname === "/" ? "default" : "ghost"}
+                className="w-full"
+                aria-label="Open projects"
+                onClick={() => {
+                  window.location.href = "/";
+                }}
+              >
+                <Kanban className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="ghost"
+                className="w-full"
+                aria-label="Add project"
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="size-4" />
+              </Button>
             </div>
-          </CollapsibleRoot>
+          )}
         </SidebarContent>
 
         <SidebarFooter>
-          <Button variant="outline" className="w-full justify-center" onClick={() => void handleSignOut()} disabled={isSigningOut}>
+          <Button
+            variant="outline"
+            className={sidebarOpen ? "w-full justify-center" : "w-full justify-center px-0"}
+            onClick={() => void handleSignOut()}
+            disabled={isSigningOut}
+            aria-label="Log out"
+          >
             <SignOut className="size-4" />
-            {isSigningOut ? "Signing out..." : "Log out"}
+            {sidebarOpen ? (isSigningOut ? "Signing out..." : "Log out") : null}
           </Button>
         </SidebarFooter>
       </Sidebar>

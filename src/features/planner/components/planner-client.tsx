@@ -12,13 +12,16 @@ import {
   GitBranch,
   MagnifyingGlass,
   Minus,
+  PencilSimple,
   Plus,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { format, parseISO } from "date-fns";
 
 import type { PlannedTask, Project, ProjectPlan, TaskStatus, TaskType } from "@/domain/planner";
+import { shiftBusinessDays } from "@/domain/date-utils";
 import { DatePickerField } from "@/features/planner/components/date-picker-field";
+import { ProjectRenameDialog } from "@/features/planner/components/project-rename-dialog";
 import { TaskDialog } from "@/features/planner/components/task-dialog";
 import { WorkspaceSidebar } from "@/features/planner/components/workspace-sidebar";
 import { Badge } from "@/components/ui/badge";
@@ -131,8 +134,8 @@ function buildTimeline(start: string | null, end: string | null) {
   }
 
   const dates: string[] = [];
-  let cursor = parseISO(start);
-  const finish = parseISO(end);
+  let cursor = parseISO(shiftBusinessDays(start, -1));
+  const finish = parseISO(shiftBusinessDays(end, 1));
 
   while (cursor <= finish) {
     const day = cursor.getDay();
@@ -209,6 +212,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [view, setView] = useState<ViewMode>("list");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
+  const [renameOpen, setRenameOpen] = useState(false);
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(initialPlan.tasks.map((task) => [task.id, task.hasChildren ? false : task.isExpanded])),
   );
@@ -226,7 +230,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [pendingTaskIds, setPendingTaskIds] = useState<Record<string, boolean>>({});
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
   const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
-  const [, startTransition] = useTransition();
+  const [isPending, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
 
   const taskMap = useMemo(() => new Map(plan.tasks.map((task) => [task.id, task])), [plan.tasks]);
@@ -355,6 +359,26 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       setExpandedMap((current) => ({ ...current, [taskId]: !nextExpanded }));
       toast.error(error instanceof Error ? error.message : "Failed to update row state.");
     }
+  }
+
+  async function renameProject(nextName: string) {
+    startTransition(async () => {
+      try {
+        const nextPlan = await requestPlan(`/api/projects/${plan.project.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: nextName }),
+        });
+
+        if (nextPlan) {
+          applyPlan(nextPlan);
+          setRenameOpen(false);
+          toast.success("Project renamed");
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to rename project.");
+      }
+    });
   }
 
   function matchesTask(task: PlannedTask) {
@@ -928,8 +952,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         >
           <div
             className={cn(
-              "sticky left-0 z-20 flex shrink-0 items-center gap-2 border-r border-border/60 px-4 py-3",
-              task.isSummary ? "bg-muted/25 group-hover:bg-muted/35" : "bg-card group-hover:bg-muted/10",
+              "sticky left-0 z-20 flex shrink-0 items-center gap-2 overflow-hidden border-r border-border/60 px-4 py-3 shadow-[8px_0_18px_-18px_rgba(15,23,42,0.35)]",
+              task.isSummary ? "bg-card" : "bg-card",
             )}
             style={{ width: GANTT_NAME_COLUMN_WIDTH, paddingLeft: `${depth * 18 + 16}px` }}
           >
@@ -946,10 +970,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             ) : (
               <span className="inline-flex size-7 items-center justify-center text-muted-foreground/50">•</span>
             )}
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1 overflow-hidden">
               <button
                 className={cn(
-                  "cursor-pointer truncate text-left font-medium transition hover:text-primary",
+                  "block w-full cursor-pointer truncate text-left font-medium transition hover:text-primary",
                   task.isSummary && "uppercase tracking-wide",
                 )}
                 onClick={(event) => {
@@ -959,7 +983,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               >
                 {task.name}
               </button>
-              <p className="text-xs text-muted-foreground">
+              <p className="truncate text-xs text-muted-foreground">
                 {formatShortDate(task.computedPlannedStart)} → {formatShortDate(task.computedPlannedEnd)}
               </p>
             </div>
@@ -1041,6 +1065,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" onClick={() => setRenameOpen(true)}>
+                  <PencilSimple />
+                  Rename
+                </Button>
                 <DropdownMenuRoot>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline">
@@ -1238,6 +1266,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
           )}
         </section>
       </main>
+
+      <ProjectRenameDialog
+        open={renameOpen}
+        onOpenChange={setRenameOpen}
+        initialName={plan.project.name}
+        onSubmit={renameProject}
+        isPending={isPending}
+      />
 
       <TaskDialog
         open={dialogState.open}

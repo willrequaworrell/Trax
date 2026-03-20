@@ -3,9 +3,10 @@
 import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
-import { ArrowSquareOut, Copy, MagnifyingGlass, Trash } from "@phosphor-icons/react";
+import { ArrowSquareOut, Copy, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
 
 import type { Project } from "@/domain/planner";
+import { ProjectRenameDialog } from "@/features/planner/components/project-rename-dialog";
 import { WorkspaceSidebar } from "@/features/planner/components/workspace-sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +38,7 @@ export function ProjectList({ initialProjects }: Props) {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [renameProjectId, setRenameProjectId] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const filteredProjects = useMemo(() => {
@@ -122,6 +124,39 @@ export function ProjectList({ initialProjects }: Props) {
     });
   }
 
+  async function renameProject(projectId: string, nextName: string) {
+    startTransition(async () => {
+      try {
+        const response = await fetch(`/api/projects/${projectId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: nextName }),
+        });
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Failed to rename project.");
+        }
+
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === payload.project.id
+              ? { ...project, name: payload.project.name, description: payload.project.description, updatedAt: payload.project.updatedAt }
+              : project,
+          ),
+        );
+        setRenameProjectId(null);
+        toast.success("Project renamed");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to rename project.");
+      }
+    });
+  }
+
+  const projectBeingRenamed = renameProjectId
+    ? projects.find((project) => project.id === renameProjectId) ?? null
+    : null;
+
   return (
     <>
       <div className="flex min-h-screen bg-background">
@@ -203,6 +238,10 @@ export function ProjectList({ initialProjects }: Props) {
                           <DropdownMenuItem asChild>
                             <Link href={`/projects/${project.id}`}>Open planner</Link>
                           </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setRenameProjectId(project.id)}>
+                            <PencilSimple className="size-4" />
+                            Rename project
+                          </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => void duplicateProject(project.id, project.name)}>
                             <Copy className="size-4" />
                             Duplicate project
@@ -257,6 +296,22 @@ export function ProjectList({ initialProjects }: Props) {
           </DialogFooter>
         </DialogContent>
       </DialogRoot>
+
+      <ProjectRenameDialog
+        open={projectBeingRenamed !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRenameProjectId(null);
+          }
+        }}
+        initialName={projectBeingRenamed?.name ?? ""}
+        onSubmit={(nextName) => {
+          if (projectBeingRenamed) {
+            return renameProject(projectBeingRenamed.id, nextName);
+          }
+        }}
+        isPending={isPending}
+      />
     </>
   );
 }
