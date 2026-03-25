@@ -42,6 +42,19 @@ test("normalizes not-started tasks with progress into in-progress", () => {
   assert.equal(normalized, "in_progress");
 });
 
+test("does not treat 100 percent complete as done without an actual end", () => {
+  const normalized = normalizeStoredTaskStatus(
+    makeTask({
+      id: "task_100",
+      name: "Awaiting actual end",
+      percentComplete: 100,
+      status: "done",
+    }),
+  );
+
+  assert.equal(normalized, "in_progress");
+});
+
 test("finds status fixes without rewriting hierarchy", () => {
   const updates = findTaskNormalizationUpdates([
     makeTask({

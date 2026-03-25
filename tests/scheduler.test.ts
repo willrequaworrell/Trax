@@ -198,7 +198,7 @@ test("derives in-progress and done statuses from execution data", () => {
   const plan = computeProjectPlan({
     project: makeProject(),
     tasks: [
-      makeTask({ id: "in_progress", name: "In progress", percentComplete: 40 }),
+      makeTask({ id: "in_progress", name: "In progress", percentComplete: 100 }),
       makeTask({ id: "done", name: "Done", percentComplete: 0, actualEnd: "2026-03-16" }),
     ],
     dependencies: [],
@@ -209,6 +209,28 @@ test("derives in-progress and done statuses from execution data", () => {
   const done = plan.tasks.find((task) => task.id === "done");
   assert.equal(started?.rolledUpStatus, "in_progress");
   assert.equal(done?.rolledUpStatus, "done");
+});
+
+test("uses actual start as the forecast anchor for started tasks", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({
+        id: "started",
+        name: "Started",
+        plannedStart: "2026-03-16",
+        plannedDurationDays: 3,
+        actualStart: "2026-03-18",
+        percentComplete: 40,
+      }),
+    ],
+    dependencies: [],
+    checkpoints: [],
+  });
+
+  const started = plan.tasks.find((task) => task.id === "started");
+  assert.equal(started?.computedPlannedStart, "2026-03-18");
+  assert.equal(started?.computedPlannedEnd, "2026-03-20");
 });
 
 test("rolls in-progress state to the parent summary without changing scheduling", () => {

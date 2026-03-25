@@ -18,8 +18,9 @@ import {
 } from "@phosphor-icons/react";
 import { format, parseISO } from "date-fns";
 
+import { computeCheckpointPercent } from "@/domain/checkpoints";
 import type { Checkpoint, PlannedTask, Project, ProjectPlan, TaskType } from "@/domain/planner";
-import { shiftBusinessDays } from "@/domain/date-utils";
+import { isoToday, shiftBusinessDays } from "@/domain/date-utils";
 import { DatePickerField } from "@/features/planner/components/date-picker-field";
 import { ProjectRenameDialog } from "@/features/planner/components/project-rename-dialog";
 import { TaskDialog } from "@/features/planner/components/task-dialog";
@@ -74,11 +75,46 @@ type StatusFilter = "all" | "open" | "done";
 type EditableField = "progress" | "start" | "due" | "dependencies";
 type CheckpointEditableField = "name" | "progress" | "weight";
 
+class RequestError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly details?: string[],
+  ) {
+    super(message);
+    this.name = "RequestError";
+  }
+}
+
 const LIST_GRID_CLASS = "grid-cols-[minmax(240px,1.7fr)_140px_170px_120px_120px_minmax(160px,1fr)_56px]";
 const GANTT_NAME_COLUMN_WIDTH = 320;
 const GANTT_DEFAULT_COLUMN_WIDTH = 48;
 const GANTT_MAX_COLUMN_WIDTH = 96;
 const GANTT_ZOOM_STEP = 12;
+const LIST_DEPTH_INDENT = 18;
+const ROOT_DEPTH_STYLE = {
+  rowTintClass: "bg-background",
+  rowHoverTintClass: "hover:bg-muted/10",
+};
+
+const DEPTH_STYLE_CYCLE = [
+  {
+    rowTintClass: "bg-muted/34",
+    rowHoverTintClass: "hover:bg-muted/40",
+  },
+  {
+    rowTintClass: "bg-muted/58",
+    rowHoverTintClass: "hover:bg-muted/66",
+  },
+  {
+    rowTintClass: "bg-muted/78",
+    rowHoverTintClass: "hover:bg-muted/86",
+  },
+  {
+    rowTintClass: "bg-muted/92",
+    rowHoverTintClass: "hover:bg-muted",
+  },
+] as const;
 
 type CheckpointDraft = {
   name: string;
@@ -233,6 +269,34 @@ function plannerDisplayEnd(task: PlannedTask) {
   return task.computedPlannedEnd ?? task.plannedEnd;
 }
 
+function actualDisplayStart(task: PlannedTask) {
+  return task.actualStart ?? task.computedActualStart;
+}
+
+function actualDisplayEnd(task: PlannedTask) {
+  return task.actualEnd ?? task.computedActualEnd;
+}
+
+function isActualComplete(task: PlannedTask) {
+  return Boolean(actualDisplayEnd(task));
+}
+
+function isActualInProgress(task: PlannedTask) {
+  return Boolean(actualDisplayStart(task)) && !isActualComplete(task);
+}
+
+function timelineSubtitle(task: PlannedTask) {
+  if (isActualComplete(task)) {
+    return `Actual ${formatShortDate(actualDisplayStart(task))} → ${formatShortDate(actualDisplayEnd(task))}`;
+  }
+
+  if (isActualInProgress(task)) {
+    return `Actual ${formatShortDate(actualDisplayStart(task))} → — • Forecast due ${formatShortDate(plannerDisplayEnd(task))}`;
+  }
+
+  return `Forecast ${formatShortDate(plannerDisplayStart(task))} → ${formatShortDate(plannerDisplayEnd(task))}`;
+}
+
 function sortPlannerTasks(a: PlannedTask, b: PlannedTask) {
   const startA = plannerDisplayStart(a);
   const startB = plannerDisplayStart(b);
@@ -250,6 +314,44 @@ function sortPlannerTasks(a: PlannedTask, b: PlannedTask) {
   }
 
   return a.sortOrder - b.sortOrder || a.name.localeCompare(b.name);
+}
+
+function depthCycleIndex(depth: number) {
+  return ((Math.max(depth, 1) - 1) % DEPTH_STYLE_CYCLE.length) as 0 | 1 | 2 | 3;
+}
+
+function depthTintClass(depth: number, variant: "task" | "checkpoint") {
+  if (variant === "task" && depth === 0) {
+    return cn(ROOT_DEPTH_STYLE.rowTintClass, ROOT_DEPTH_STYLE.rowHoverTintClass);
+  }
+
+  const style = DEPTH_STYLE_CYCLE[depthCycleIndex(depth)];
+
+  return cn(style.rowTintClass, style.rowHoverTintClass);
+}
+
+function ganttBarTone(task: PlannedTask) {
+  if (task.isSummary) {
+    return {
+      shellClass: "bg-black/18 border-black/12",
+      fillClass: "bg-black/72",
+      textClass: "text-black/82",
+    };
+  }
+
+  if (task.type === "milestone") {
+    return {
+      shellClass: "bg-black/24 border-black/14",
+      fillClass: "bg-black/88",
+      textClass: "text-white",
+    };
+  }
+
+  return {
+    shellClass: "bg-black/14 border-black/10",
+    fillClass: "bg-black/68",
+    textClass: "text-black/78",
+  };
 }
 
 function ProgressPill({ value, compact = false }: { value: number; compact?: boolean }) {
@@ -329,9 +431,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [pendingCheckpointIds, setPendingCheckpointIds] = useState<Record<string, boolean>>({});
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
   const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
+  const [baselineGateOpen, setBaselineGateOpen] = useState(false);
+  const [baselineGatePending, setBaselineGatePending] = useState(false);
+  const [baselineGateContent, setBaselineGateContent] = useState({
+    title: "Freeze baseline first",
+    description: "Freeze the current forecast as the project baseline before recording execution progress.",
+  });
+  const [actualEndGateOpen, setActualEndGateOpen] = useState(false);
+  const [actualEndGatePending, setActualEndGatePending] = useState(false);
+  const [actualEndGateTaskId, setActualEndGateTaskId] = useState<string | null>(null);
+  const [actualEndGateDate, setActualEndGateDate] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
   const undoToastIdsRef = useRef<Set<string>>(new Set());
+  const baselineGateActionRef = useRef<(() => Promise<void>) | null>(null);
+  const actualEndGateActionRef = useRef<((actualEnd: string) => Promise<void>) | null>(null);
 
   const taskMap = useMemo(() => new Map(plan.tasks.map((task) => [task.id, task])), [plan.tasks]);
   const rootTasks = useMemo(
@@ -524,10 +638,53 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     const payload = await response.json().catch(() => null);
 
     if (!response.ok) {
-      throw new Error(payload?.error ?? "Request failed.");
+      throw new RequestError(payload?.error ?? "Request failed.", payload?.code, payload?.details);
     }
 
     return payload as ProjectPlan;
+  }
+
+  function openBaselineGate(content: { title: string; description: string }, action: () => Promise<void>) {
+    baselineGateActionRef.current = action;
+    setBaselineGateContent(content);
+    setBaselineGateOpen(true);
+  }
+
+  function openActualEndGate(task: PlannedTask, action: (actualEnd: string) => Promise<void>) {
+    actualEndGateActionRef.current = action;
+    setActualEndGateTaskId(task.id);
+    setActualEndGateDate(actualDisplayEnd(task) ?? plannerDisplayEnd(task) ?? isoToday());
+    setActualEndGateOpen(true);
+  }
+
+  function patchHasExecutionSignal(task: PlannedTask, patch: Record<string, unknown>) {
+    const nextActualStart =
+      patch.actualStart !== undefined
+        ? (patch.actualStart as string | null)
+        : actualDisplayStart(task);
+    const nextActualEnd =
+      patch.actualEnd !== undefined
+        ? (patch.actualEnd as string | null)
+        : actualDisplayEnd(task);
+    const nextPercent =
+      patch.percentComplete !== undefined
+        ? Number(patch.percentComplete)
+        : task.percentComplete;
+
+    return Boolean(nextActualStart || nextActualEnd || nextPercent > 0);
+  }
+
+  function patchNeedsActualEnd(task: PlannedTask, patch: Record<string, unknown>) {
+    const nextPercent =
+      patch.percentComplete !== undefined
+        ? Number(patch.percentComplete)
+        : task.percentComplete;
+    const nextActualEnd =
+      patch.actualEnd !== undefined
+        ? (patch.actualEnd as string | null)
+        : actualDisplayEnd(task);
+
+    return nextPercent >= 100 && !nextActualEnd;
   }
 
   const undoPendingDelete = useEffectEvent(async (actionId: string) => {
@@ -663,7 +820,23 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     );
   }
 
-  async function patchTask(task: PlannedTask, patch: Record<string, unknown>, successMessage?: string) {
+  async function freezeBaselineRequest(showToast = true) {
+    const nextPlan = await requestPlan(`/api/projects/${plan.project.id}/freeze-baseline`, {
+      method: "POST",
+    });
+
+    if (nextPlan) {
+      applyPlan(nextPlan);
+
+      if (showToast) {
+        toast.success(plan.project.baselineCapturedAt ? "Baseline reset" : "Baseline frozen");
+      }
+    }
+
+    return nextPlan;
+  }
+
+  async function patchTaskRequest(task: PlannedTask, patch: Record<string, unknown>, successMessage?: string) {
     markTaskPending(task.id, true);
 
     try {
@@ -680,11 +853,55 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       if (successMessage) {
         toast.success(successMessage);
       }
+
+      return nextPlan;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to update task.");
+      return null;
     } finally {
       markTaskPending(task.id, false);
     }
+  }
+
+  function patchTask(task: PlannedTask, patch: Record<string, unknown>, successMessage?: string) {
+    if (patchNeedsActualEnd(task, patch)) {
+      openActualEndGate(task, async (actualEnd) => {
+        const nextPatch = { ...patch, actualEnd };
+
+        if (!plan.project.baselineCapturedAt && patchHasExecutionSignal(task, nextPatch)) {
+          openBaselineGate(
+            {
+              title: "Freeze baseline before completing work",
+              description: "Actual dates and progress need a committed baseline first. Freeze the current forecast, then finish the task.",
+            },
+            async () => {
+              await freezeBaselineRequest(false);
+              await patchTaskRequest(task, nextPatch, successMessage);
+            },
+          );
+          return;
+        }
+
+        await patchTaskRequest(task, nextPatch, successMessage);
+      });
+      return;
+    }
+
+    if (!plan.project.baselineCapturedAt && patchHasExecutionSignal(task, patch)) {
+      openBaselineGate(
+        {
+          title: "Freeze baseline before recording progress",
+          description: "Execution updates should compare against a frozen baseline. Freeze the current forecast first, then continue.",
+        },
+        async () => {
+          await freezeBaselineRequest(false);
+          await patchTaskRequest(task, patch, successMessage);
+        },
+      );
+      return;
+    }
+
+    void patchTaskRequest(task, patch, successMessage);
   }
 
   async function createCheckpointForTask(task: PlannedTask) {
@@ -715,6 +932,72 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
   async function saveCheckpoint(taskId: string, checkpoint: Checkpoint) {
     const draft = checkpointDraft(checkpoint);
+    const parentTask = taskMap.get(taskId);
+
+    if (!parentTask) {
+      toast.error("Parent task not found.");
+      return;
+    }
+
+    const nextPercent = computeCheckpointPercent(
+      parentTask.checkpoints.map((item) =>
+        item.id === checkpoint.id
+          ? {
+              percentComplete: Number(draft.percentComplete),
+              weightPoints: Number(draft.weightPoints),
+            }
+          : {
+              percentComplete: item.percentComplete,
+              weightPoints: item.weightPoints,
+            },
+      ),
+    );
+
+    if (nextPercent >= 100 && !actualDisplayEnd(parentTask)) {
+      openActualEndGate(parentTask, async (actualEnd) => {
+        if (!plan.project.baselineCapturedAt) {
+          openBaselineGate(
+            {
+              title: "Freeze baseline before finishing work",
+              description: "Checkpoint-driven completion still needs a committed baseline first. Freeze the current forecast, then continue.",
+            },
+            async () => {
+              await freezeBaselineRequest(false);
+              await patchTaskRequest(parentTask, { actualEnd });
+              await saveCheckpointRequest(taskId, checkpoint, draft);
+            },
+          );
+          return;
+        }
+
+        const updatedPlan = await patchTaskRequest(parentTask, { actualEnd });
+
+        if (updatedPlan) {
+          await saveCheckpointRequest(taskId, checkpoint, draft);
+        }
+      });
+      return;
+    }
+
+    if (!plan.project.baselineCapturedAt && nextPercent > 0) {
+      openBaselineGate(
+        {
+          title: "Freeze baseline before recording checkpoint progress",
+          description: "Checkpoint progress is part of actual execution. Freeze the current forecast first, then continue.",
+        },
+        async () => {
+          await freezeBaselineRequest(false);
+          await saveCheckpointRequest(taskId, checkpoint, draft);
+        },
+      );
+      return;
+    }
+
+    await saveCheckpointRequest(taskId, checkpoint, draft);
+  }
+
+  async function saveCheckpointRequest(taskId: string, checkpoint: Checkpoint, draft: CheckpointDraft) {
+
     markCheckpointPending(checkpoint.id, true);
 
     try {
@@ -806,14 +1089,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   async function freezeBaseline() {
     startTransition(async () => {
       try {
-        const nextPlan = await requestPlan(`/api/projects/${plan.project.id}/freeze-baseline`, {
-          method: "POST",
-        });
-
-        if (nextPlan) {
-          applyPlan(nextPlan);
-          toast.success(plan.project.baselineCapturedAt ? "Baseline reset" : "Baseline frozen");
-        }
+        await freezeBaselineRequest();
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Failed to freeze baseline.");
       }
@@ -884,20 +1160,61 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       );
     }
 
-    if (task.actualStart || task.computedActualStart) {
-      items.push(`Actual start: ${formatShortDate(task.actualStart ?? task.computedActualStart)}`);
-    }
-
-    if (task.actualEnd || task.computedActualEnd) {
-      items.push(`Actual end: ${formatShortDate(task.actualEnd ?? task.computedActualEnd)}`);
-    }
-
     const variance = forecastVarianceLabel(task);
     if (variance) {
       items.push(variance);
     }
 
     return items;
+  }
+
+  function renderListDateValue(task: PlannedTask, field: "start" | "due") {
+    const actualValue = field === "start" ? actualDisplayStart(task) : actualDisplayEnd(task);
+    const forecastValue = field === "start" ? plannerDisplayStart(task) : plannerDisplayEnd(task);
+    const isEditableForecast = !task.isSummary;
+    const isFieldActive = isCellActive(task.id, field);
+    const isTaskPending = Boolean(pendingTaskIds[task.id]);
+
+    return (
+      <div className="min-w-0" onClick={(event) => event.stopPropagation()}>
+        {isEditableForecast && isFieldActive ? (
+          <DatePickerField
+            value={forecastValue}
+            open
+            onOpenChange={(open) => {
+              if (!open) {
+                setActiveCell(null);
+              }
+            }}
+            onChange={(value) => {
+              setActiveCell(null);
+              void patchTask(
+                task,
+                field === "start"
+                  ? buildSchedulePatch(task, { plannedStart: value })
+                  : buildSchedulePatch(task, { plannedEnd: value }),
+              );
+            }}
+            disabled={isTaskPending}
+            className="flex-nowrap"
+            triggerClassName="w-full"
+          />
+        ) : (
+          <button
+            className={cn(
+              isEditableForecast ? cellButtonClass(task.id, field) : "w-full rounded-2xl px-2 py-1 text-left",
+              "flex items-center gap-2 py-1 text-sm",
+            )}
+            onClick={isEditableForecast ? () => setActiveCell({ taskId: task.id, field }) : undefined}
+            disabled={isTaskPending}
+          >
+            <span className="truncate text-foreground">{formatShortDate(actualValue)}</span>
+            <span className="shrink-0 text-muted-foreground/70">/</span>
+            <span className="truncate text-muted-foreground">{formatShortDate(forecastValue)}</span>
+          </button>
+        )}
+      </div>
+    );
   }
 
   async function removeTask(taskId: string) {
@@ -1001,8 +1318,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     const isPending = Boolean(pendingTaskIds[task.id]);
     const progressChanged = currentProgress !== task.percentComplete;
     const progressActive = isCellActive(task.id, "progress");
-    const startActive = isCellActive(task.id, "start");
-    const dueActive = isCellActive(task.id, "due");
     const dependenciesActive = isCellActive(task.id, "dependencies");
 
     return (
@@ -1085,63 +1400,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
           )}
         </div>
 
-        <div onClick={(event) => event.stopPropagation()}>
-          {startActive ? (
-            <DatePickerField
-              value={plannerDisplayStart(task)}
-              open
-              onOpenChange={(open) => {
-                if (!open) {
-                  setActiveCell(null);
-                }
-              }}
-              onChange={(value) => {
-                setActiveCell(null);
-                void patchTask(task, buildSchedulePatch(task, { plannedStart: value }));
-              }}
-              disabled={isPending}
-              className="flex-nowrap"
-              triggerClassName="w-full"
-            />
-          ) : (
-            <button
-              className={cn(cellButtonClass(task.id, "start"), "text-sm text-muted-foreground")}
-              onClick={() => setActiveCell({ taskId: task.id, field: "start" })}
-              disabled={isPending}
-            >
-              {formatShortDate(plannerDisplayStart(task))}
-            </button>
-          )}
-        </div>
+        <div>{renderListDateValue(task, "start")}</div>
 
-        <div onClick={(event) => event.stopPropagation()}>
-          {dueActive ? (
-            <DatePickerField
-              value={plannerDisplayEnd(task)}
-              open
-              onOpenChange={(open) => {
-                if (!open) {
-                  setActiveCell(null);
-                }
-              }}
-              onChange={(value) => {
-                setActiveCell(null);
-                void patchTask(task, buildSchedulePatch(task, { plannedEnd: value }));
-              }}
-              disabled={isPending}
-              className="flex-nowrap"
-              triggerClassName="w-full"
-            />
-          ) : (
-            <button
-              className={cn(cellButtonClass(task.id, "due"), "text-sm text-muted-foreground")}
-              onClick={() => setActiveCell({ taskId: task.id, field: "due" })}
-              disabled={isPending}
-            >
-              {formatShortDate(plannerDisplayEnd(task))}
-            </button>
-          )}
-        </div>
+        <div>{renderListDateValue(task, "due")}</div>
 
         <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
           <DropdownMenuRoot
@@ -1201,8 +1462,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         <div>
           <ProgressPill value={task.rolledUpPercentComplete} />
         </div>
-        <div className="text-sm text-muted-foreground">{formatShortDate(task.computedPlannedStart)}</div>
-        <div className="text-sm text-muted-foreground">{formatShortDate(task.computedPlannedEnd)}</div>
+        <div>{renderListDateValue(task, "start")}</div>
+        <div>{renderListDateValue(task, "due")}</div>
         <div>{dependencyPills(task)}</div>
       </>
     );
@@ -1301,12 +1562,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             return (
               <div
                 key={checkpoint.id}
-                className="grid items-center gap-3 border-t border-border/40 px-4 py-2 md:grid-cols-[minmax(220px,1.9fr)_144px_104px_auto]"
-                style={{ paddingLeft: `${depth * 18 + 48}px` }}
+                className={cn(
+                  "group relative grid items-center gap-3 overflow-hidden border-t border-border/40 px-4 py-2 transition-colors md:grid-cols-[minmax(220px,1.9fr)_144px_104px_auto]",
+                  depthTintClass(depth, "checkpoint"),
+                )}
               >
-                <div className="min-w-0">
+                <div className="relative min-w-0">
                   {nameActive ? (
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2" style={{ paddingLeft: `${depth * LIST_DEPTH_INDENT + 48}px` }}>
                       <InputGroup>
                         <InputGroupField
                           value={draft.name}
@@ -1329,6 +1592,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   ) : (
                     <button
                       className={cn(checkpointCellButtonClass(checkpoint.id, "name"), "py-1.5 text-sm")}
+                      style={{ paddingLeft: `${depth * LIST_DEPTH_INDENT + 48}px` }}
                       onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "name" })}
                       disabled={isPending}
                     >
@@ -1528,13 +1792,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         const row = (
       <div
         className={cn(
-          "grid items-center border-b border-border/60 px-4 py-3 transition hover:bg-muted/20",
+          "group relative grid items-center overflow-hidden border-b border-border/60 px-4 py-2 transition-colors",
           LIST_GRID_CLASS,
-          isSummaryRow ? "cursor-pointer bg-muted/35 hover:bg-muted/45" : "cursor-default",
+          depthTintClass(depth, "task"),
+          isSummaryRow ? "cursor-pointer" : "cursor-default",
         )}
         onClick={isSummaryRow ? () => void toggleTask(task.id) : undefined}
       >
-        <div className="flex min-w-0 items-center gap-2" style={{ paddingLeft: `${depth * 18}px` }}>
+        <div className="relative flex min-w-0 items-center gap-2" style={{ paddingLeft: `${depth * LIST_DEPTH_INDENT}px` }}>
           {hasExpandableContent ? (
               <button
               className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
@@ -1546,7 +1811,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               {expanded ? <CaretDown className="size-4" /> : <CaretRight className="size-4" />}
             </button>
           ) : (
-            <span className="inline-flex size-7 items-center justify-center text-muted-foreground/50">•</span>
+            <span aria-hidden className="inline-flex size-7 items-center justify-center" />
           )}
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -1655,18 +1920,25 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     }
 
     const expanded = search.trim().length > 0 ? true : expandedMap[task.id] ?? false;
-    const style = taskBarStyle(task, timeline);
+    const forecastStyle = taskBarStyle(task, timeline);
     const baselineStyle = barStyleForRange(
       task.computedBaselinePlannedStart,
       task.computedBaselinePlannedEnd,
       timeline,
     );
+    const actualStart = actualDisplayStart(task);
+    const actualEnd = actualDisplayEnd(task);
+    const inProgressActualEnd = actualStart && !actualEnd ? isoToday() : null;
     const actualStyle = barStyleForRange(
-      task.actualStart ?? task.computedActualStart,
-      task.actualEnd ?? task.computedActualEnd ?? task.actualStart ?? task.computedActualStart,
+      actualStart,
+      actualEnd ?? inProgressActualEnd,
       timeline,
     );
     const percent = progressPercent(task);
+    const barTone = ganttBarTone(task);
+    const showCompletedActual = Boolean(actualStart && actualEnd);
+    const showInProgressActual = Boolean(actualStart && !actualEnd);
+    const showForecastBar = !showCompletedActual;
 
     return (
       <CollapsibleRoot key={task.id} open={expanded}>
@@ -1711,7 +1983,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 {task.name}
               </button>
               <p className="truncate text-xs text-muted-foreground">
-                {formatShortDate(task.computedPlannedStart)} → {formatShortDate(task.computedPlannedEnd)}
+                {timelineSubtitle(task)}
               </p>
             </div>
           </div>
@@ -1727,34 +1999,53 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             </div>
             {task.computedBaselinePlannedStart && task.computedBaselinePlannedEnd ? (
               <div
-                className="absolute top-4 h-8 rounded-2xl border border-border/70 bg-muted/55"
+                className="absolute top-4 h-8 rounded-2xl border border-black/10 bg-black/8"
                 style={baselineStyle}
               />
             ) : null}
-            {task.actualStart || task.computedActualStart ? (
+            {showForecastBar ? (
               <div
-                className="absolute top-2 h-1.5 rounded-full bg-emerald-500/90"
+                className={cn(
+                  "absolute top-3 flex h-10 items-center overflow-hidden rounded-2xl border px-3 text-sm font-medium shadow-sm",
+                  barTone.shellClass,
+                  barTone.textClass,
+                )}
+                style={forecastStyle}
+              >
+                <div className="relative z-10 flex w-full items-center justify-end">
+                  <span className="text-xs font-semibold">{percent}%</span>
+                </div>
+              </div>
+            ) : null}
+            {showInProgressActual ? (
+              <div
+                className={cn(
+                  "absolute top-3 h-10 rounded-2xl shadow-sm",
+                  barTone.fillClass,
+                )}
                 style={actualStyle}
               />
             ) : null}
-            <div
-              className={cn(
-                "absolute top-3 flex h-10 items-center overflow-hidden rounded-2xl border border-white/30 px-3 text-sm font-medium text-white shadow-sm",
-                task.isSummary ? "bg-chart-2/35" : task.type === "milestone" ? "bg-chart-4/35" : "bg-chart-1/35",
-              )}
-              style={style}
-            >
+            {showCompletedActual ? (
               <div
                 className={cn(
-                  "absolute inset-y-0 left-0 rounded-2xl",
-                  task.isSummary ? "bg-chart-2" : task.type === "milestone" ? "bg-chart-4" : "bg-chart-1",
+                  "absolute top-3 flex h-10 items-center overflow-hidden rounded-2xl border px-3 text-sm font-medium shadow-sm",
+                  barTone.shellClass,
+                  barTone.textClass,
                 )}
-                style={{ width: `${Math.max(percent, task.type === "milestone" ? 100 : 8)}%` }}
-              />
-              <div className="relative z-10 flex w-full items-center justify-end">
-                <span className="text-xs font-semibold">{percent}%</span>
+                style={actualStyle}
+              >
+                <div
+                  className={cn(
+                    "absolute inset-0 rounded-2xl",
+                    barTone.fillClass,
+                  )}
+                />
+                <div className="relative z-10 flex w-full items-center justify-end">
+                  <span className="text-xs font-semibold">{percent}%</span>
+                </div>
               </div>
-            </div>
+            ) : null}
           </div>
         </div>
         {task.childIds.length > 0 ? (
@@ -1915,8 +2206,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 <span>Name</span>
                 <span>Status</span>
                 <span>Progress</span>
-                <span>Start</span>
-                <span>Due</span>
+                <span className="space-y-1">
+                  <span className="block">Start</span>
+                  <span className="block text-[10px] font-medium normal-case tracking-normal text-muted-foreground/80">Actual / Forecast</span>
+                </span>
+                <span className="space-y-1">
+                  <span className="block">Due</span>
+                  <span className="block text-[10px] font-medium normal-case tracking-normal text-muted-foreground/80">Actual / Forecast</span>
+                </span>
                 <span>Dependencies</span>
                 <span className="text-right">⋯</span>
               </div>
@@ -2034,6 +2331,134 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             <Button onClick={() => void rebaseSchedule()} disabled={isPending || !rebaseStartDate}>
               {isPending ? <Spinner /> : null}
               Rebase forecast
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={baselineGateOpen}
+        onOpenChange={(open) => {
+          setBaselineGateOpen(open);
+
+          if (!open) {
+            baselineGateActionRef.current = null;
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{baselineGateContent.title}</DialogTitle>
+            <DialogDescription>{baselineGateContent.description}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBaselineGateOpen(false);
+                baselineGateActionRef.current = null;
+              }}
+              disabled={baselineGatePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const action = baselineGateActionRef.current;
+
+                if (!action) {
+                  setBaselineGateOpen(false);
+                  return;
+                }
+
+                startTransition(async () => {
+                  setBaselineGatePending(true);
+
+                  try {
+                    await action();
+                    setBaselineGateOpen(false);
+                    baselineGateActionRef.current = null;
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Failed to freeze baseline.");
+                  } finally {
+                    setBaselineGatePending(false);
+                  }
+                });
+              }}
+              disabled={baselineGatePending}
+            >
+              {baselineGatePending ? <Spinner /> : null}
+              Freeze baseline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={actualEndGateOpen}
+        onOpenChange={(open) => {
+          setActualEndGateOpen(open);
+
+          if (!open) {
+            actualEndGateActionRef.current = null;
+            setActualEndGateTaskId(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Actual end required</DialogTitle>
+            <DialogDescription>
+              Completed work needs an actual end date before it can count as done.
+              {actualEndGateTaskId ? ` ${taskMap.get(actualEndGateTaskId)?.name ?? "This task"} will be marked complete once you confirm the date.` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Actual end</label>
+              <DatePickerField value={actualEndGateDate} onChange={setActualEndGateDate} />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setActualEndGateOpen(false);
+                actualEndGateActionRef.current = null;
+                setActualEndGateTaskId(null);
+              }}
+              disabled={actualEndGatePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const action = actualEndGateActionRef.current;
+
+                if (!action || !actualEndGateDate) {
+                  toast.error("Choose an actual end date.");
+                  return;
+                }
+
+                startTransition(async () => {
+                  setActualEndGatePending(true);
+
+                  try {
+                    await action(actualEndGateDate);
+                    setActualEndGateOpen(false);
+                    actualEndGateActionRef.current = null;
+                    setActualEndGateTaskId(null);
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Failed to update actual end.");
+                  } finally {
+                    setActualEndGatePending(false);
+                  }
+                });
+              }}
+              disabled={actualEndGatePending || !actualEndGateDate}
+            >
+              {actualEndGatePending ? <Spinner /> : null}
+              Save actual end
             </Button>
           </DialogFooter>
         </DialogContent>

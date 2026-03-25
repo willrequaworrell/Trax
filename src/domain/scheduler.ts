@@ -78,7 +78,7 @@ function deriveLeafDurationFromSchedule(
 }
 
 function deriveStatus(_taskStatus: TaskStatus, percentComplete: number, actualStart: string | null, actualEnd: string | null) {
-  if (percentComplete >= 100 || actualEnd) {
+  if (actualEnd) {
     return "done" satisfies TaskStatus;
   }
 
@@ -191,6 +191,49 @@ function displayedStart(task: PlannedTask) {
   return task.computedPlannedStart ?? task.plannedStart;
 }
 
+function deriveProjectedLeafRange(task: Task, durationDays: number) {
+  const actualStart = task.actualStart ? clampToBusinessDay(task.actualStart) : null;
+  const actualEnd = task.actualEnd ? clampToBusinessDay(task.actualEnd) : null;
+
+  if (actualStart || actualEnd) {
+    const projectedStart = actualStart ?? actualEnd ?? clampToBusinessDay(task.plannedStart ?? isoToday());
+
+    if (actualEnd) {
+      return {
+        start: projectedStart,
+        end: actualEnd,
+      };
+    }
+
+    if (task.type === "milestone") {
+      return {
+        start: projectedStart,
+        end: projectedStart,
+      };
+    }
+
+    return {
+      start: projectedStart,
+      end: addDurationToStart(projectedStart, Math.max(durationDays, 1)),
+    };
+  }
+
+  const projectedStart = clampToBusinessDay(task.plannedStart ?? isoToday());
+  const projectedEnd =
+    task.type === "milestone"
+      ? projectedStart
+      : addDurationToStart(projectedStart, Math.max(durationDays, 1));
+
+  return {
+    start: projectedStart,
+    end: projectedEnd,
+  };
+}
+
+function derivedActualStart(task: Task) {
+  return task.actualStart ?? task.actualEnd;
+}
+
 export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
   const tasks = [...snapshot.tasks].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
   const taskMap = new Map(tasks.map((task) => [task.id, task]));
@@ -236,11 +279,9 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     const hasCheckpoints = task.type === "task" && checkpoints.length > 0;
     const durationDays = deriveLeafDuration(task);
     const baselineDurationDays = deriveBaselineLeafDuration(task);
-    const baseStart = clampToBusinessDay(task.plannedStart ?? isoToday());
-    const baseEnd =
-      task.plannedMode === "start_end" && task.plannedEnd
-        ? clampToBusinessDay(task.plannedEnd)
-        : addDurationToStart(baseStart, Math.max(durationDays, 1));
+    const projectedRange = deriveProjectedLeafRange(task, durationDays);
+    const baseStart = projectedRange.start;
+    const baseEnd = projectedRange.end;
 
     let requiredStart = baseStart;
     let requiredEnd = baseEnd;
@@ -288,20 +329,29 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
       }
     }
 
-    const shiftBy = Math.max(
-      businessDayShiftGap(baseStart, requiredStart),
-      businessDayShiftGap(baseEnd, requiredEnd),
-    );
-    const computedStart = shiftBusinessDays(baseStart, shiftBy);
-    const computedEnd =
-      task.type === "milestone"
-        ? computedStart
-        : addDurationToStart(
-            computedStart,
-            task.plannedMode === "start_end" && task.plannedEnd
-              ? businessDaysInclusive(baseStart, baseEnd)
-              : Math.max(durationDays, 1),
+    const computedStart =
+      task.actualStart || task.actualEnd
+        ? projectedRange.start
+        : shiftBusinessDays(
+            baseStart,
+            Math.max(
+              businessDayShiftGap(baseStart, requiredStart),
+              businessDayShiftGap(baseEnd, requiredEnd),
+            ),
           );
+    const computedEnd =
+      task.actualEnd
+        ? clampToBusinessDay(task.actualEnd)
+        : task.type === "milestone"
+          ? computedStart
+          : task.actualStart
+            ? projectedRange.end
+            : addDurationToStart(
+                computedStart,
+                task.plannedMode === "start_end" && task.plannedEnd
+                  ? businessDaysInclusive(baseStart, baseEnd)
+                  : Math.max(durationDays, 1),
+              );
     const percentComplete = hasCheckpoints ? computeCheckpointPercent(checkpoints) : task.percentComplete;
     const leafStatus = deriveStatus(task.status, percentComplete, task.actualStart, task.actualEnd);
     const computedBaselineStart = task.baselinePlannedStart
@@ -358,7 +408,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
             ? 0
             : businessDaysInclusive(computedBaselineStart, computedBaselineEnd)
           : null,
-      computedActualStart: task.actualStart,
+      computedActualStart: derivedActualStart(task),
       computedActualEnd: task.actualEnd,
       rolledUpEffortDays: task.type === "milestone" ? 0 : Math.max(durationDays, 1),
       rolledUpPercentComplete: percentComplete,
@@ -562,8 +612,19 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     rows,
     issues,
     projectPercentComplete,
-    timelineStart: minIsoDate(allTasks.map((task) => task.computedPlannedStart)),
-    timelineEnd: maxIsoDate(allTasks.map((task) => task.computedPlannedEnd)),
+    timelineStart: minIsoDate([
+      ...allTasks.map((task) => task.computedPlannedStart),
+      ...allTasks.map((task) => task.computedBaselinePlannedStart),
+      ...allTasks.map((task) => task.computedActualStart),
+    ]),
+    timelineEnd: maxIsoDate([
+      ...allTasks.map((task) => task.computedPlannedEnd),
+      ...allTasks.map((task) => task.computedBaselinePlannedEnd),
+      ...allTasks.map((task) => task.computedActualEnd),
+      ...allTasks
+        .filter((task) => task.computedActualStart && !task.computedActualEnd)
+        .map(() => clampToBusinessDay(isoToday())),
+    ]),
     upcomingTaskIds,
     blockedTaskIds,
   };

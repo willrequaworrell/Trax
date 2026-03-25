@@ -5,7 +5,7 @@ export function normalizeStoredTaskStatus(task: Pick<Task, "type" | "status" | "
     return task.status;
   }
 
-  if (task.actualEnd || task.percentComplete >= 100) {
+  if (task.actualEnd) {
     return "done";
   }
 

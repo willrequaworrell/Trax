@@ -30,19 +30,37 @@ function deriveForecastDuration(task: Task) {
   return Math.max(task.plannedDurationDays ?? 1, 1);
 }
 
-function deriveForecastEnd(task: Task) {
-  if (task.type === "summary" || !task.plannedStart) {
+function deriveForecastStart(task: Task) {
+  if (task.type === "summary") {
     return null;
   }
 
-  const start = clampToBusinessDay(task.plannedStart);
+  return task.actualStart
+    ? clampToBusinessDay(task.actualStart)
+    : task.actualEnd
+      ? clampToBusinessDay(task.actualEnd)
+      : task.plannedStart
+        ? clampToBusinessDay(task.plannedStart)
+        : null;
+}
+
+function deriveForecastEnd(task: Task) {
+  const start = deriveForecastStart(task);
+
+  if (task.type === "summary" || !start) {
+    return null;
+  }
+
+  if (task.actualEnd) {
+    return clampToBusinessDay(task.actualEnd);
+  }
 
   if (task.type === "milestone") {
     return start;
   }
 
-  if (task.plannedMode === "start_end" && task.plannedEnd) {
-    return clampToBusinessDay(task.plannedEnd);
+  if (task.plannedMode === "start_end" && task.plannedStart && task.plannedEnd) {
+    return addDurationToStart(start, Math.max(businessDaysInclusive(task.plannedStart, task.plannedEnd), 1));
   }
 
   return addDurationToStart(start, deriveForecastDuration(task));
@@ -153,6 +171,16 @@ function resolveTaskStart(
   requiredStart: string | null,
   requiredEnd: string | null,
 ) {
+  const fixedActualStart = task.actualStart ? clampToBusinessDay(task.actualStart) : null;
+
+  if (fixedActualStart) {
+    return fixedActualStart;
+  }
+
+  if (task.actualEnd) {
+    return clampToBusinessDay(task.actualEnd);
+  }
+
   const fallbackStart = task.plannedStart ? clampToBusinessDay(task.plannedStart) : null;
 
   if (task.type === "milestone") {
@@ -219,7 +247,7 @@ export function resolveForecastAnchorTask(tasks: Task[]) {
 
 export function shiftForecastTasks(tasks: Task[], offset: number) {
   return tasks.map((task) => {
-    if (!isLeafTask(task) || !task.plannedStart) {
+    if (!isLeafTask(task) || !task.plannedStart || task.actualStart || task.actualEnd) {
       return task;
     }
 
@@ -263,6 +291,10 @@ export function cascadeForecastFromSeeds(
       continue;
     }
 
+    if (task.actualStart || task.actualEnd) {
+      continue;
+    }
+
     const durationDays = deriveForecastDuration(task);
     let requiredStart: string | null = null;
     let requiredEnd: string | null = null;
@@ -274,7 +306,7 @@ export function cascadeForecastFromSeeds(
         continue;
       }
 
-      const predecessorStart = predecessor.plannedStart ? clampToBusinessDay(predecessor.plannedStart) : null;
+      const predecessorStart = deriveForecastStart(predecessor);
       const predecessorEnd = deriveForecastEnd(predecessor);
 
       switch (dependency.type) {

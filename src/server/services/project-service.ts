@@ -1,4 +1,5 @@
 import { and, eq, inArray, or } from "drizzle-orm";
+import { addDurationToStart, businessDaysInclusive, clampToBusinessDay } from "@/domain/date-utils";
 import {
   checkpointCreateSchema,
   checkpointMoveSchema,
@@ -37,7 +38,7 @@ import {
 import { computeCheckpointPercent } from "@/domain/checkpoints";
 import { computeProjectPlan } from "@/domain/scheduler";
 import { checkpoints, dependencies, pendingDeleteActions, projects, tasks } from "@/server/db/schema";
-import { CorruptedProjectError, ValidationError } from "@/server/errors";
+import { ActualEndRequiredError, BaselineRequiredError, CorruptedProjectError, ValidationError } from "@/server/errors";
 import { toCheckpointInsert, toDependencyInsert, toPendingDeleteActionInsert, toTaskInsert } from "@/server/repositories/mappers";
 import { projectRepository } from "@/server/repositories/project-repository";
 import { cascadeForecastFromSeeds, rebaseForecastTasks } from "@/server/services/forecast-schedule";
@@ -78,6 +79,51 @@ function hasForecastPatch(input: TaskUpdateInput) {
     input.plannedEnd !== undefined ||
     input.plannedDurationDays !== undefined
   );
+}
+
+function deriveTaskForecastDuration(task: Task) {
+  if (task.type === "milestone") {
+    return 0;
+  }
+
+  if (task.plannedMode === "start_end" && task.plannedStart && task.plannedEnd) {
+    return businessDaysInclusive(task.plannedStart, task.plannedEnd);
+  }
+
+  return Math.max(task.plannedDurationDays ?? 1, 1);
+}
+
+function hasExecutionSignalChange(existing: Task, patch: TaskUpdateInput) {
+  const nextPercent = patch.percentComplete ?? existing.percentComplete;
+  const nextActualStart = patch.actualStart ?? existing.actualStart;
+  const nextActualEnd = patch.actualEnd ?? existing.actualEnd;
+
+  return (
+    (patch.actualStart !== undefined && nextActualStart !== null) ||
+    (patch.actualEnd !== undefined && nextActualEnd !== null) ||
+    nextPercent > 0
+  );
+}
+
+function ensureBaselineCaptured(project: Project, existing: Task, patch: TaskUpdateInput) {
+  if (existing.type === "summary" || project.baselineCapturedAt || !hasExecutionSignalChange(existing, patch)) {
+    return;
+  }
+
+  throw new BaselineRequiredError();
+}
+
+function ensureActualEndForCompletion(existing: Task, patch: TaskUpdateInput) {
+  if (existing.type === "summary") {
+    return;
+  }
+
+  const nextPercent = patch.percentComplete ?? existing.percentComplete;
+  const nextActualEnd = patch.actualEnd ?? existing.actualEnd;
+
+  if (nextPercent >= 100 && !nextActualEnd) {
+    throw new ActualEndRequiredError();
+  }
 }
 
 async function persistForecastChanges(projectId: string, tasks: Task[]) {
@@ -733,6 +779,39 @@ function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Tas
     normalized.plannedDurationDays = Math.max(1, merged.plannedDurationDays ?? 1);
   }
 
+  const nextType = merged.type;
+  const nextActualStart = patch.actualStart ?? existing.actualStart;
+  const nextActualEnd = patch.actualEnd ?? existing.actualEnd;
+
+  if (nextType !== "summary" && patch.actualStart !== undefined && nextActualStart) {
+    normalized.plannedStart = nextActualStart;
+
+    if (!hasForecastPatch(patch)) {
+      if (nextType === "milestone") {
+        normalized.plannedMode = "start_duration";
+        normalized.plannedEnd = null;
+        normalized.plannedDurationDays = 0;
+      } else if (existing.plannedMode === "start_end" && existing.plannedStart && existing.plannedEnd) {
+        const originalDurationDays = Math.max(deriveTaskForecastDuration(existing), 1);
+        normalized.plannedMode = "start_end";
+        normalized.plannedEnd = addDurationToStart(clampToBusinessDay(nextActualStart), originalDurationDays);
+        normalized.plannedDurationDays = originalDurationDays;
+      } else {
+        normalized.plannedMode = "start_duration";
+        normalized.plannedEnd = null;
+        normalized.plannedDurationDays = Math.max(deriveTaskForecastDuration(existing), 1);
+      }
+    }
+  }
+
+  if (nextType !== "summary" && nextActualEnd) {
+    normalized.percentComplete = 100;
+
+    if (!nextActualStart) {
+      normalized.actualStart = existing.actualStart ?? existing.plannedStart ?? nextActualEnd;
+    }
+  }
+
   const normalizedTask = { ...merged, ...normalized };
   if (normalizedTask.type !== "summary") {
     const normalizedStatus = normalizeStoredTaskStatus(normalizedTask);
@@ -866,12 +945,14 @@ export async function updateTask(taskId: string, input: TaskUpdateInput) {
     throw new ValidationError("Tasks with checkpoints derive percent complete from their checkpoints.");
   }
 
+  ensureBaselineCaptured(snapshot.project, existing, parsed);
+  ensureActualEndForCompletion(existing, parsed);
   validateTaskParent(snapshot.tasks, existing.id, nextParentId);
   const normalized = normalizeTaskPatch(existing, parsed);
   await projectRepository.updateTask(taskId, { ...normalized, updatedAt: now() });
   const nextTask = { ...existing, ...normalized };
 
-  if (nextTask.type !== "summary" && hasForecastPatch(parsed)) {
+  if (nextTask.type !== "summary" && (hasForecastPatch(parsed) || parsed.actualStart !== undefined || parsed.actualEnd !== undefined)) {
     await cascadeProjectForecast(existing.projectId, [taskId]);
   }
 
@@ -988,7 +1069,26 @@ export async function createCheckpoint(taskId: string, input: CheckpointCreateIn
     throw new ValidationError("Checkpoints can only be added to tasks.");
   }
 
+  if (input.percentComplete !== undefined && input.percentComplete > 0) {
+    const project = await projectRepository.getProject(task.projectId);
+
+    if (!project?.baselineCapturedAt) {
+      throw new BaselineRequiredError();
+    }
+  }
+
   const existingCheckpoints = await projectRepository.listCheckpointsForTask(taskId);
+  const nextTaskPercent = computeCheckpointPercent([
+    ...existingCheckpoints,
+    {
+      percentComplete: parsed.percentComplete,
+      weightPoints: parsed.weightPoints,
+    },
+  ]);
+
+  if (nextTaskPercent >= 100 && !task.actualEnd) {
+    throw new ActualEndRequiredError();
+  }
   const createdAt = now();
 
   await projectRepository.createCheckpoint({
@@ -1022,6 +1122,29 @@ export async function updateCheckpoint(checkpointId: string, input: CheckpointUp
 
   if (task.type !== "task") {
     throw new ValidationError("Checkpoints can only belong to tasks.");
+  }
+
+  const project = await projectRepository.getProject(task.projectId);
+  const nextCheckpointPercent = input.percentComplete ?? checkpoint.percentComplete;
+
+  if (nextCheckpointPercent > 0 && !project?.baselineCapturedAt) {
+    throw new BaselineRequiredError();
+  }
+
+  const existingCheckpoints = await projectRepository.listCheckpointsForTask(checkpoint.taskId);
+  const nextCheckpoints = existingCheckpoints.map((item) =>
+    item.id === checkpoint.id
+      ? {
+          ...item,
+          percentComplete: input.percentComplete ?? item.percentComplete,
+          weightPoints: input.weightPoints ?? item.weightPoints,
+        }
+      : item,
+  );
+  const nextTaskPercent = computeCheckpointPercent(nextCheckpoints);
+
+  if (nextTaskPercent >= 100 && !task.actualEnd) {
+    throw new ActualEndRequiredError();
   }
 
   await projectRepository.updateCheckpoint(checkpointId, { ...parsed, updatedAt: now() });

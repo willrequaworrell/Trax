@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { FlowArrow, Link as LinkIcon, Trash } from "@phosphor-icons/react";
 
 import type { Dependency, PlannedMode, PlannedTask, ProjectPlan, TaskCreateResult, TaskType } from "@/domain/planner";
+import { isoToday } from "@/domain/date-utils";
 import { DatePickerField } from "@/features/planner/components/date-picker-field";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -76,6 +77,17 @@ type Props = {
   allowedCreateTypes?: TaskType[];
 };
 
+class RequestError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly details?: string[],
+  ) {
+    super(message);
+    this.name = "RequestError";
+  }
+}
+
 function toDraft(task: PlannedTask | null, parentId: string | null, type: TaskType): Draft {
   if (!task) {
     return {
@@ -137,6 +149,13 @@ export function TaskDialog({
   });
   const [pendingDependencies, setPendingDependencies] = useState<PendingDependency[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [baselineGateOpen, setBaselineGateOpen] = useState(false);
+  const [baselineGatePending, setBaselineGatePending] = useState(false);
+  const [actualEndGateOpen, setActualEndGateOpen] = useState(false);
+  const [actualEndGatePending, setActualEndGatePending] = useState(false);
+  const [actualEndDraft, setActualEndDraft] = useState<string | null>(null);
+  const baselineGateActionRef = useRef<(() => Promise<void>) | null>(null);
+  const actualEndGateActionRef = useRef<((actualEnd: string) => Promise<void>) | null>(null);
   const taskMap = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
   const disallowedParentIds = useMemo(() => {
     if (!task) {
@@ -197,92 +216,159 @@ export function TaskDialog({
       lagDays: 0,
     });
     setPendingDependencies([]);
+    setActualEndDraft(task?.actualEnd ?? task?.computedPlannedEnd ?? isoToday());
   }, [mode, parentId, task, type, createParentLocked]);
 
+  function openBaselineGate(action: () => Promise<void>) {
+    baselineGateActionRef.current = action;
+    setBaselineGateOpen(true);
+  }
+
+  function openActualEndGate(action: (actualEnd: string) => Promise<void>) {
+    actualEndGateActionRef.current = action;
+    setActualEndDraft(draft.actualEnd ?? task?.actualEnd ?? task?.computedPlannedEnd ?? isoToday());
+    setActualEndGateOpen(true);
+  }
+
+  function draftHasExecutionSignal() {
+    return Boolean(draft.actualStart || draft.actualEnd || draft.percentComplete > 0);
+  }
+
+  async function requestJson(input: RequestInfo, init?: RequestInit) {
+    const response = await fetch(input, init);
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new RequestError(payload?.error ?? "Request failed.", payload?.code, payload?.details);
+    }
+
+    return payload;
+  }
+
+  async function freezeBaselineRequest() {
+    const nextPlan = (await requestJson(`/api/projects/${projectId}/freeze-baseline`, {
+      method: "POST",
+    })) as ProjectPlan;
+    onPlanChange(nextPlan);
+    return nextPlan;
+  }
+
+  async function performSave(override?: Partial<Draft>) {
+    const nextDraft = { ...draft, ...override };
+    const payload = {
+      parentId: nextDraft.parentId,
+      name: nextDraft.name.trim(),
+      notes: nextDraft.notes,
+      type: nextDraft.type,
+      plannedMode: isSummaryTask ? null : nextDraft.plannedMode,
+      plannedStart: isSummaryTask ? null : nextDraft.plannedStart,
+      plannedEnd: isSummaryTask || nextDraft.plannedMode !== "start_end" ? null : nextDraft.plannedEnd,
+      plannedDurationDays:
+        isSummaryTask ? null : nextDraft.type === "milestone" ? 0 : nextDraft.plannedDurationDays,
+      actualStart: isSummaryTask ? null : nextDraft.actualStart,
+      actualEnd: isSummaryTask ? null : nextDraft.actualEnd,
+      percentComplete: nextDraft.percentComplete,
+    };
+
+    if (mode === "edit" && task) {
+      const nextPlan = (await requestJson(`/api/tasks/${task.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })) as ProjectPlan;
+
+      onPlanChange(nextPlan);
+      toast.success("Task updated");
+      onOpenChange(false);
+      return;
+    }
+
+    const created = (await requestJson(`/api/projects/${projectId}/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })) as TaskCreateResult;
+
+    let finalPlan = created.plan;
+    onPlanChange(finalPlan);
+
+    for (const dependency of pendingDependencies) {
+      const dependencyPayload =
+        dependency.mode === "blockedBy"
+          ? {
+              predecessorTaskId: dependency.taskId,
+              successorTaskId: created.taskId,
+              type: dependency.type,
+              lagDays: dependency.lagDays,
+            }
+          : {
+              predecessorTaskId: created.taskId,
+              successorTaskId: dependency.taskId,
+              type: dependency.type,
+              lagDays: dependency.lagDays,
+            };
+      const dependencyPlan = (await requestJson(`/api/projects/${projectId}/dependencies`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(dependencyPayload),
+      })) as ProjectPlan;
+      finalPlan = dependencyPlan;
+    }
+
+      onPlanChange(finalPlan);
+    toast.success(nextDraft.type === "milestone" ? "Milestone created" : "Task created");
+    onOpenChange(false);
+  }
+
   async function handleSave() {
+    if (!isSummaryTask && draft.percentComplete >= 100 && !draft.actualEnd) {
+      openActualEndGate(async (actualEnd) => {
+        setDraft((current) => ({ ...current, actualEnd }));
+
+        if (!baselineCapturedAt && draftHasExecutionSignal()) {
+          openBaselineGate(async () => {
+            await freezeBaselineRequest();
+            setDraft((current) => ({ ...current, actualEnd }));
+            setSubmitting(true);
+
+            try {
+              await performSave({ actualEnd });
+            } finally {
+              setSubmitting(false);
+            }
+          });
+          return;
+        }
+
+        setSubmitting(true);
+
+        try {
+          await performSave({ actualEnd });
+        } finally {
+          setSubmitting(false);
+        }
+      });
+      return;
+    }
+
+    if (mode === "edit" && !isSummaryTask && !baselineCapturedAt && draftHasExecutionSignal()) {
+      openBaselineGate(async () => {
+        await freezeBaselineRequest();
+        setSubmitting(true);
+
+        try {
+          await performSave();
+        } finally {
+          setSubmitting(false);
+        }
+      });
+      return;
+    }
+
     setSubmitting(true);
 
     try {
-      const payload = {
-        parentId: draft.parentId,
-        name: draft.name.trim(),
-        notes: draft.notes,
-        type: draft.type,
-        plannedMode: isSummaryTask ? null : draft.plannedMode,
-        plannedStart: isSummaryTask ? null : draft.plannedStart,
-        plannedEnd: isSummaryTask || draft.plannedMode !== "start_end" ? null : draft.plannedEnd,
-        plannedDurationDays:
-          isSummaryTask ? null : draft.type === "milestone" ? 0 : draft.plannedDurationDays,
-        actualStart: isSummaryTask ? null : draft.actualStart,
-        actualEnd: isSummaryTask ? null : draft.actualEnd,
-        percentComplete: draft.percentComplete,
-      };
-
-      if (mode === "edit" && task) {
-        const response = await fetch(`/api/tasks/${task.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const nextPlan = await response.json();
-
-        if (!response.ok) {
-          throw new Error(nextPlan.error ?? "Failed to save task.");
-        }
-
-        onPlanChange(nextPlan);
-        toast.success("Task updated");
-        onOpenChange(false);
-        return;
-      }
-
-      const response = await fetch(`/api/projects/${projectId}/tasks`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const created = (await response.json()) as TaskCreateResult & { error?: string };
-
-      if (!response.ok) {
-        throw new Error(created.error ?? "Failed to save task.");
-      }
-
-      let finalPlan = created.plan;
-      onPlanChange(finalPlan);
-
-      for (const dependency of pendingDependencies) {
-        const dependencyPayload =
-          dependency.mode === "blockedBy"
-            ? {
-                predecessorTaskId: dependency.taskId,
-                successorTaskId: created.taskId,
-                type: dependency.type,
-                lagDays: dependency.lagDays,
-              }
-            : {
-                predecessorTaskId: created.taskId,
-                successorTaskId: dependency.taskId,
-                type: dependency.type,
-                lagDays: dependency.lagDays,
-              };
-        const dependencyResponse = await fetch(`/api/projects/${projectId}/dependencies`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(dependencyPayload),
-        });
-        const dependencyPlan = await dependencyResponse.json();
-
-        if (!dependencyResponse.ok) {
-          onPlanChange(finalPlan);
-          throw new Error(dependencyPlan.error ?? "Task created, but a dependency could not be saved.");
-        }
-
-        finalPlan = dependencyPlan;
-      }
-
-      onPlanChange(finalPlan);
-      toast.success(draft.type === "milestone" ? "Milestone created" : "Task created");
-      onOpenChange(false);
+      await performSave();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to save task.");
     } finally {
@@ -432,8 +518,9 @@ export function TaskDialog({
         }));
 
   return (
-    <DialogRoot open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+    <>
+      <DialogRoot open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
         <DialogHeader>
           <DialogTitle>
             {mode === "edit"
@@ -727,7 +814,16 @@ export function TaskDialog({
                         min={0}
                         max={100}
                         step={5}
-                        onValueChange={(value) => setDraft((current) => ({ ...current, percentComplete: value[0] ?? 0 }))}
+                        onValueChange={(value) => {
+                          const nextPercent = value[0] ?? 0;
+                          setDraft((current) => ({ ...current, percentComplete: nextPercent }));
+
+                          if (nextPercent >= 100 && !draft.actualEnd) {
+                            openActualEndGate(async (actualEnd) => {
+                              setDraft((current) => ({ ...current, actualEnd }));
+                            });
+                          }
+                        }}
                         disabled={hasCheckpoints}
                       >
                         <SliderTrack>
@@ -940,7 +1036,134 @@ export function TaskDialog({
             Save
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </DialogRoot>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={baselineGateOpen}
+        onOpenChange={(open) => {
+          setBaselineGateOpen(open);
+
+          if (!open) {
+            baselineGateActionRef.current = null;
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Freeze baseline first</DialogTitle>
+            <DialogDescription>
+              Execution updates need a committed baseline to compare against. Freeze the current forecast, then continue with the save.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBaselineGateOpen(false);
+                baselineGateActionRef.current = null;
+              }}
+              disabled={baselineGatePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const action = baselineGateActionRef.current;
+
+                if (!action) {
+                  setBaselineGateOpen(false);
+                  return;
+                }
+
+                void (async () => {
+                  setBaselineGatePending(true);
+
+                  try {
+                    await action();
+                    setBaselineGateOpen(false);
+                    baselineGateActionRef.current = null;
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Failed to freeze baseline.");
+                  } finally {
+                    setBaselineGatePending(false);
+                  }
+                })();
+              }}
+              disabled={baselineGatePending}
+            >
+              {baselineGatePending ? <Spinner /> : null}
+              Freeze baseline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={actualEndGateOpen}
+        onOpenChange={(open) => {
+          setActualEndGateOpen(open);
+
+          if (!open) {
+            actualEndGateActionRef.current = null;
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Actual end required</DialogTitle>
+            <DialogDescription>
+              Completed work needs an actual end date before it can count as done.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Actual end</label>
+              <DatePickerField value={actualEndDraft} onChange={setActualEndDraft} />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setActualEndGateOpen(false);
+                actualEndGateActionRef.current = null;
+              }}
+              disabled={actualEndGatePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const action = actualEndGateActionRef.current;
+
+                if (!action || !actualEndDraft) {
+                  toast.error("Choose an actual end date.");
+                  return;
+                }
+
+                void (async () => {
+                  setActualEndGatePending(true);
+
+                  try {
+                    await action(actualEndDraft);
+                    setActualEndGateOpen(false);
+                    actualEndGateActionRef.current = null;
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Failed to save the actual end date.");
+                  } finally {
+                    setActualEndGatePending(false);
+                  }
+                })();
+              }}
+              disabled={actualEndGatePending || !actualEndDraft}
+            >
+              {actualEndGatePending ? <Spinner /> : null}
+              Save actual end
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+    </>
   );
 }

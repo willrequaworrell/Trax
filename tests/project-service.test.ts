@@ -275,11 +275,50 @@ test("normalizes start/end tasks with progress into in-progress", async () => {
     plannedStart: "2026-03-16",
     plannedEnd: "2026-03-18",
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
 
   await projectService.updateTask(created!.taskId, { percentComplete: 25 });
   const stored = await projectRepository.getTask(created!.taskId);
 
   assert.equal(stored?.status, "in_progress");
+});
+
+test("requires a baseline before recording execution progress", async () => {
+  const plan = await makeProject("baseline-required-before-progress");
+  const created = await projectService.createTask(plan.project.id, {
+    name: "Scheduled task",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+
+  await assert.rejects(
+    projectService.updateTask(created!.taskId, { percentComplete: 25 }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "baseline_required",
+  );
+});
+
+test("requires an actual end before 100 percent completion can be saved", async () => {
+  const plan = await makeProject("actual-end-required");
+  const created = await projectService.createTask(plan.project.id, {
+    name: "Scheduled task",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+
+  await projectService.freezeProjectBaseline(plan.project.id);
+
+  await assert.rejects(
+    projectService.updateTask(created!.taskId, { percentComplete: 100 }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "actual_end_required",
+  );
 });
 
 test("rejects converting a dependency-linked leaf task into a summary", async () => {
@@ -341,11 +380,47 @@ test("normalizes start/end tasks with actual completion into done", async () => 
     plannedStart: "2026-03-16",
     plannedEnd: "2026-03-18",
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
 
   await projectService.updateTask(created!.taskId, { actualEnd: "2026-03-18" });
   const stored = await projectRepository.getTask(created!.taskId);
 
   assert.equal(stored?.status, "done");
+});
+
+test("actual completion reschedules downstream forecast from the actual finish", async () => {
+  const plan = await makeProject("actual-finish-cascade");
+  const taskA = await projectService.createTask(plan.project.id, {
+    name: "A",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+  const taskB = await projectService.createTask(plan.project.id, {
+    name: "B",
+    type: "task",
+    plannedStart: "2026-03-18",
+    plannedDurationDays: 1,
+  });
+
+  await projectService.createDependency(plan.project.id, {
+    predecessorTaskId: taskA!.taskId,
+    successorTaskId: taskB!.taskId,
+    type: "FS",
+    lagDays: 0,
+  });
+
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(taskA!.taskId, {
+    actualStart: "2026-03-17",
+    actualEnd: "2026-03-19",
+  });
+
+  const storedA = await projectRepository.getTask(taskA!.taskId);
+  const storedB = await projectRepository.getTask(taskB!.taskId);
+
+  assert.equal(storedA?.plannedStart, "2026-03-17");
+  assert.equal(storedB?.plannedStart, "2026-03-19");
 });
 
 test("preserves start/end scheduling on task creation", async () => {
@@ -584,6 +659,7 @@ test("wrap task preserves leaf schedule, progress, and dependencies", async () =
     type: "FS",
     lagDays: 0,
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
   await projectService.updateTask(target!.taskId, {
     actualStart: "2026-03-18",
     percentComplete: 40,
@@ -639,15 +715,16 @@ test("derives task progress from checkpoints while keeping task schedule fields"
     plannedStart: "2026-03-16",
     plannedDurationDays: 5,
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
 
   await projectService.createCheckpoint(task!.taskId, {
     name: "Build selectors",
-    percentComplete: 100,
+    percentComplete: 50,
     weightPoints: 1,
   });
   const updated = await projectService.createCheckpoint(task!.taskId, {
     name: "Handle edge cases",
-    percentComplete: 50,
+    percentComplete: 75,
     weightPoints: 3,
   });
 
@@ -656,10 +733,10 @@ test("derives task progress from checkpoints while keeping task schedule fields"
 
   assert.equal(stored?.plannedStart, "2026-03-16");
   assert.equal(stored?.plannedDurationDays, 5);
-  assert.equal(stored?.percentComplete, 63);
+  assert.equal(stored?.percentComplete, 69);
   assert.equal(stored?.status, "in_progress");
   assert.equal(plannedTask?.isProgressDerived, true);
-  assert.equal(plannedTask?.rolledUpPercentComplete, 63);
+  assert.equal(plannedTask?.rolledUpPercentComplete, 69);
   assert.equal(plannedTask?.checkpoints.length, 2);
 });
 
@@ -707,10 +784,11 @@ test("blocks manual percent edits while checkpoints exist and restores direct ed
     name: "Develop automation solution",
     type: "task",
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
 
   const withFirstCheckpoint = await projectService.createCheckpoint(task!.taskId, {
     name: "Checkpoint A",
-    percentComplete: 100,
+    percentComplete: 50,
     weightPoints: 1,
   });
   const firstCheckpoint = withFirstCheckpoint?.tasks.find((item) => item.id === task!.taskId)?.checkpoints[0];
@@ -728,7 +806,7 @@ test("blocks manual percent edits while checkpoints exist and restores direct ed
 
   await projectService.deleteCheckpoint(firstCheckpoint.id);
   const storedAfterDelete = await projectRepository.getTask(task!.taskId);
-  assert.equal(storedAfterDelete?.percentComplete, 100);
+  assert.equal(storedAfterDelete?.percentComplete, 50);
 
   await projectService.updateTask(task!.taskId, { percentComplete: 60 });
   const storedAfterManualEdit = await projectRepository.getTask(task!.taskId);
@@ -806,6 +884,7 @@ test("undo restores a deleted section subtree with checkpoints and dependencies"
     plannedStart: "2026-03-17",
     plannedDurationDays: 3,
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
 
   await projectService.createCheckpoint(child!.taskId, {
     name: "Checkpoint A",
@@ -845,18 +924,21 @@ test("deleting a checkpoint creates undo metadata and undo restores parent progr
     name: "Develop automation solution",
     type: "task",
   });
+  await projectService.freezeProjectBaseline(plan.project.id);
 
   await projectService.createCheckpoint(task!.taskId, {
     name: "Checkpoint A",
-    percentComplete: 100,
+    percentComplete: 0,
     weightPoints: 1,
   });
   const withSecond = await projectService.createCheckpoint(task!.taskId, {
     name: "Checkpoint B",
-    percentComplete: 0,
+    percentComplete: 100,
     weightPoints: 1,
   });
-  const checkpointToDelete = withSecond?.tasks.find((item) => item.id === task!.taskId)?.checkpoints[0];
+  const checkpointToDelete = withSecond?.tasks
+    .find((item) => item.id === task!.taskId)
+    ?.checkpoints.find((checkpoint) => checkpoint.name === "Checkpoint B");
 
   assert.ok(checkpointToDelete);
 
@@ -1094,8 +1176,8 @@ test("rebase shifts forecast while preserving baseline and actuals", async () =>
   const rebased = await projectService.rebaseProjectForecast(plan.project.id, "2026-03-23");
   const stored = await projectRepository.getTask(created!.taskId);
 
-  assert.equal(rebased?.tasks.find((task) => task.id === created!.taskId)?.plannedStart, "2026-03-23");
-  assert.equal(stored?.plannedStart, "2026-03-23");
+  assert.equal(rebased?.tasks.find((task) => task.id === created!.taskId)?.plannedStart, "2026-03-17");
+  assert.equal(stored?.plannedStart, "2026-03-17");
   assert.equal(stored?.baselinePlannedStart, "2026-03-16");
   assert.equal(stored?.actualStart, "2026-03-17");
   assert.equal(stored?.percentComplete, 50);

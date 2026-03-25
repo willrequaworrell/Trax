@@ -1,4 +1,9 @@
-export type ServiceErrorCode = "validation_error" | "corrupted_project" | "unauthorized";
+export type ServiceErrorCode =
+  | "validation_error"
+  | "corrupted_project"
+  | "unauthorized"
+  | "baseline_required"
+  | "actual_end_required";
 
 export class ServiceError extends Error {
   constructor(
@@ -13,8 +18,20 @@ export class ServiceError extends Error {
 }
 
 export class ValidationError extends ServiceError {
-  constructor(message: string) {
-    super(message, "validation_error", 422);
+  constructor(message: string, details?: string[]) {
+    super(message, "validation_error", 422, details);
+  }
+}
+
+export class BaselineRequiredError extends ServiceError {
+  constructor(message = "Freeze a baseline before recording execution progress.") {
+    super(message, "baseline_required", 422);
+  }
+}
+
+export class ActualEndRequiredError extends ServiceError {
+  constructor(message = "Completed tasks must include an actual end date.") {
+    super(message, "actual_end_required", 422);
   }
 }
 
