@@ -17,41 +17,45 @@ export default function Icon() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "#101010",
-          borderRadius: 10,
-          padding: 5,
+          background: "#161616",
+          borderRadius: 8,
+          padding: 7,
         }}
       >
         <div
           style={{
             display: "flex",
-            width: "100%",
-            height: "100%",
+            width: 18,
+            flexDirection: "column",
             gap: 3,
           }}
         >
           <div
             style={{
               display: "flex",
-              flex: 1,
               background: "#f5f5f5",
-              borderRadius: 4,
+              height: 5,
+              borderRadius: 999,
             }}
           />
           <div
             style={{
               display: "flex",
-              flex: 1,
-              background: "#d4d4d4",
-              borderRadius: 4,
+              width: 14,
+              background: "#f5f5f5",
+              opacity: 0.8,
+              height: 5,
+              borderRadius: 999,
             }}
           />
           <div
             style={{
               display: "flex",
-              flex: 1,
-              background: "#737373",
-              borderRadius: 4,
+              width: 11,
+              background: "#f5f5f5",
+              opacity: 0.6,
+              height: 5,
+              borderRadius: 999,
             }}
           />
         </div>

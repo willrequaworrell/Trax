@@ -41,7 +41,6 @@ type Draft = {
   plannedDurationDays: number | null;
   actualStart: string | null;
   actualEnd: string | null;
-  status: PlannedTask["status"];
   percentComplete: number;
 };
 
@@ -67,6 +66,7 @@ type Props = {
   mode: "create" | "edit";
   projectId: string;
   task: PlannedTask | null;
+  baselineCapturedAt: string | null;
   parentId: string | null;
   type: TaskType;
   tasks: PlannedTask[];
@@ -89,7 +89,6 @@ function toDraft(task: PlannedTask | null, parentId: string | null, type: TaskTy
       plannedDurationDays: type === "summary" ? null : type === "milestone" ? 0 : 1,
       actualStart: null,
       actualEnd: null,
-      status: "not_started",
       percentComplete: 0,
     };
   }
@@ -105,7 +104,6 @@ function toDraft(task: PlannedTask | null, parentId: string | null, type: TaskTy
     plannedDurationDays: task.plannedDurationDays ?? task.computedPlannedDurationDays,
     actualStart: task.actualStart,
     actualEnd: task.actualEnd,
-    status: task.status,
     percentComplete: task.percentComplete,
   };
 }
@@ -121,6 +119,7 @@ export function TaskDialog({
   mode,
   projectId,
   task,
+  baselineCapturedAt,
   parentId,
   type,
   tasks,
@@ -138,9 +137,35 @@ export function TaskDialog({
   });
   const [pendingDependencies, setPendingDependencies] = useState<PendingDependency[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const taskMap = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
+  const disallowedParentIds = useMemo(() => {
+    if (!task) {
+      return new Set<string>();
+    }
+
+    const blocked = new Set<string>([task.id]);
+    const stack = [...task.childIds];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+
+      if (!current || blocked.has(current)) {
+        continue;
+      }
+
+      blocked.add(current);
+      const child = taskMap.get(current);
+
+      if (child) {
+        stack.push(...child.childIds);
+      }
+    }
+
+    return blocked;
+  }, [task, taskMap]);
   const summaryTasks = useMemo(
-    () => tasks.filter((item) => item.isSummary && item.parentId === null && item.id !== task?.id),
-    [task?.id, tasks],
+    () => tasks.filter((item) => item.isSummary && !disallowedParentIds.has(item.id)),
+    [disallowedParentIds, tasks],
   );
   const leafTasks = useMemo(
     () => tasks.filter((item) => !item.isSummary && item.id !== task?.id),
@@ -148,15 +173,15 @@ export function TaskDialog({
   );
   const incomingDependencies = task?.blockedBy ?? [];
   const outgoingDependencies = task?.blocking ?? [];
-  const taskMap = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
   const isSummaryTask = draft.type === "summary";
+  const hasCheckpoints = (task?.checkpoints.length ?? 0) > 0;
   const isSubtaskCreate = mode === "create" && createParentLocked;
   const showCreateTypeTabs = mode === "create" && !isSubtaskCreate;
   const showActualProgress = mode === "edit";
-  const showPlannedSchedule = !(mode === "create" && isSummaryTask);
+  const showForecastSchedule = !(mode === "create" && isSummaryTask);
   const availableCreateTypes = useMemo(
-    () => (isSubtaskCreate ? allowedCreateTypes.filter((item) => item !== "summary") : allowedCreateTypes),
-    [allowedCreateTypes, isSubtaskCreate],
+    () => allowedCreateTypes,
+    [allowedCreateTypes],
   );
   const lockedParentName = useMemo(
     () => (parentId ? tasks.find((item) => item.id === parentId)?.name ?? "Selected section" : "Selected section"),
@@ -190,7 +215,6 @@ export function TaskDialog({
           isSummaryTask ? null : draft.type === "milestone" ? 0 : draft.plannedDurationDays,
         actualStart: isSummaryTask ? null : draft.actualStart,
         actualEnd: isSummaryTask ? null : draft.actualEnd,
-        status: draft.status,
         percentComplete: draft.percentComplete,
       };
 
@@ -282,7 +306,6 @@ export function TaskDialog({
       }
 
       onPlanChange(nextPlan);
-      toast.success("Task removed");
       onOpenChange(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to delete task.");
@@ -371,7 +394,6 @@ export function TaskDialog({
       }
 
       onPlanChange(nextPlan);
-      toast.success("Dependency removed");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to remove dependency.");
     }
@@ -417,12 +439,12 @@ export function TaskDialog({
             {mode === "edit"
               ? `Edit ${task?.name ?? "Task"}`
               : isSubtaskCreate
-                ? "Add Subtask"
+                ? "Add Child Item"
                 : "Add to Plan"}
           </DialogTitle>
           <DialogDescription>
             {isSubtaskCreate
-              ? "Create a subtask or milestone inside the selected section. Dependencies can be drafted before the task is saved."
+              ? "Create a child task, subsection, or milestone inside the selected section. Dependencies can be drafted before the task is saved."
               : "Choose whether to add a task or a summary section, then fill in the relevant planning details."}
           </DialogDescription>
         </DialogHeader>
@@ -436,7 +458,6 @@ export function TaskDialog({
                   setDraft((current) => ({
                     ...current,
                     type: value as TaskType,
-                    parentId: value === "summary" ? null : current.parentId,
                     plannedMode: value === "summary" ? null : current.plannedMode ?? "start_duration",
                     plannedDurationDays:
                       value === "summary" ? null : current.type === "milestone" ? 0 : current.plannedDurationDays ?? 1,
@@ -473,7 +494,6 @@ export function TaskDialog({
                       setDraft((current) => ({
                         ...current,
                         type: value as TaskType,
-                        parentId: value === "summary" ? null : current.parentId,
                         plannedMode: value === "summary" ? null : current.plannedMode ?? "start_duration",
                       }))
                     }
@@ -494,11 +514,7 @@ export function TaskDialog({
 
               <div className="space-y-2">
                 <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Parent section</label>
-                {draft.type === "summary" ? (
-                  <div className="rounded-xl border border-dashed border-border/70 bg-muted/30 px-4 py-2.5 text-sm text-muted-foreground">
-                    Sections are always top-level.
-                  </div>
-                ) : createParentLocked ? (
+                {createParentLocked ? (
                   <div className="rounded-xl border border-dashed border-border/70 bg-muted/30 px-4 py-2.5 text-sm text-foreground">
                     {lockedParentName}
                   </div>
@@ -538,12 +554,58 @@ export function TaskDialog({
               </div>
             </div>
 
-            {showPlannedSchedule ? (
+            {mode === "edit" ? (
+              <div className="space-y-4 rounded-2xl border border-border/70 bg-muted/20 p-4">
+                <div>
+                  <h3 className="font-medium">Baseline schedule</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {baselineCapturedAt
+                      ? `Frozen on ${new Date(baselineCapturedAt).toLocaleDateString()}.`
+                      : "No baseline has been frozen for this project yet."}
+                  </p>
+                </div>
+                {isSummaryTask ? (
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-xl border border-dashed border-border/70 bg-background px-4 py-3 text-sm">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Baseline start</p>
+                      <p className="mt-2 font-medium">{task?.computedBaselinePlannedStart ?? "Not set"}</p>
+                    </div>
+                    <div className="rounded-xl border border-dashed border-border/70 bg-background px-4 py-3 text-sm">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Baseline end</p>
+                      <p className="mt-2 font-medium">{task?.computedBaselinePlannedEnd ?? "Not set"}</p>
+                    </div>
+                    <div className="rounded-xl border border-dashed border-border/70 bg-background px-4 py-3 text-sm">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Baseline effort</p>
+                      <p className="mt-2 font-medium">{task?.computedBaselinePlannedDurationDays ?? 0} business days</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-xl border border-dashed border-border/70 bg-background px-4 py-3 text-sm">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Baseline start</p>
+                      <p className="mt-2 font-medium">{task?.baselinePlannedStart ?? "Not set"}</p>
+                    </div>
+                    <div className="rounded-xl border border-dashed border-border/70 bg-background px-4 py-3 text-sm">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Baseline end</p>
+                      <p className="mt-2 font-medium">{task?.baselinePlannedEnd ?? "Not set"}</p>
+                    </div>
+                    <div className="rounded-xl border border-dashed border-border/70 bg-background px-4 py-3 text-sm">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Baseline duration</p>
+                      <p className="mt-2 font-medium">
+                        {task?.baselinePlannedDurationDays ?? (task?.type === "milestone" ? 0 : "Not set")}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {showForecastSchedule ? (
               <div className="space-y-4 rounded-2xl border border-border/70 bg-muted/20 p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="font-medium">Planned schedule</h3>
-                    <p className="text-sm text-muted-foreground">Choose between start + duration or start + end date planning.</p>
+                    <h3 className="font-medium">Forecast schedule</h3>
+                    <p className="text-sm text-muted-foreground">Update the working schedule. Downstream dependent forecast tasks will replan from these changes.</p>
                   </div>
                   {!isSummaryTask ? (
                     <SelectRoot
@@ -656,25 +718,6 @@ export function TaskDialog({
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Status</label>
-                      <SelectRoot
-                        value={draft.status}
-                        onValueChange={(value) =>
-                          setDraft((current) => ({ ...current, status: value as Draft["status"] }))
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select status" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="not_started">Not started</SelectItem>
-                          <SelectItem value="in_progress">In progress</SelectItem>
-                          <SelectItem value="blocked">Blocked</SelectItem>
-                          <SelectItem value="done">Done</SelectItem>
-                        </SelectContent>
-                      </SelectRoot>
-                    </div>
-                    <div className="space-y-2">
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Percent complete</label>
                         <span className="text-sm font-medium">{draft.percentComplete}%</span>
@@ -685,14 +728,52 @@ export function TaskDialog({
                         max={100}
                         step={5}
                         onValueChange={(value) => setDraft((current) => ({ ...current, percentComplete: value[0] ?? 0 }))}
+                        disabled={hasCheckpoints}
                       >
                         <SliderTrack>
                           <SliderRange />
                         </SliderTrack>
                         <SliderThumb />
                       </SliderRoot>
-                      <p className="text-xs text-muted-foreground">Use 5% increments to keep progress updates consistent.</p>
+                      <p className="text-xs text-muted-foreground">
+                        {hasCheckpoints
+                          ? "This task's percent complete is derived from its checkpoints in the planner list."
+                          : "Use 5% increments to keep progress updates consistent."}
+                      </p>
                     </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {mode === "edit" && task && !isSummaryTask ? (
+              <div className="space-y-4 rounded-2xl border border-border/70 bg-muted/20 p-4">
+                <div>
+                  <h3 className="font-medium">Checkpoints</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Tasks keep their own dates and dependencies. Checkpoints track execution detail and can drive task progress from the planner list.
+                  </p>
+                </div>
+                {task.checkpoints.length > 0 ? (
+                  <div className="space-y-2">
+                    {task.checkpoints.map((checkpoint) => (
+                      <div
+                        key={checkpoint.id}
+                        className="flex items-center justify-between rounded-xl border border-border/70 bg-background px-3 py-2 text-sm"
+                      >
+                        <div>
+                          <p className="font-medium">{checkpoint.name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {checkpoint.percentComplete}% complete • {checkpoint.weightPoints} pts
+                          </p>
+                        </div>
+                        <Badge variant="secondary">{checkpoint.percentComplete >= 100 ? "Done" : "Checkpoint"}</Badge>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
+                    No checkpoints yet. Add them from the task menu in the planner list.
                   </div>
                 )}
               </div>

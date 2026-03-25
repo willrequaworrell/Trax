@@ -8,8 +8,11 @@ import {
   minIsoDate,
   shiftBusinessDays,
 } from "@/domain/date-utils";
+import { computeCheckpointPercent } from "@/domain/checkpoints";
 import type {
+  Checkpoint,
   Dependency,
+  PendingDeleteAction,
   PlannedTask,
   PlanningIssue,
   Project,
@@ -22,6 +25,8 @@ type Snapshot = {
   project: Project;
   tasks: Task[];
   dependencies: Dependency[];
+  checkpoints: Checkpoint[];
+  pendingDeleteActions?: PendingDeleteAction[];
 };
 
 function makeIssue(
@@ -34,34 +39,45 @@ function makeIssue(
 }
 
 function deriveLeafDuration(task: Task) {
-  if (task.type === "milestone") {
+  return deriveLeafDurationFromSchedule(
+    task.type,
+    task.plannedStart,
+    task.plannedEnd,
+    task.plannedDurationDays,
+  );
+}
+
+function deriveBaselineLeafDuration(task: Task) {
+  return deriveLeafDurationFromSchedule(
+    task.type,
+    task.baselinePlannedStart,
+    task.baselinePlannedEnd,
+    task.baselinePlannedDurationDays,
+  );
+}
+
+function deriveLeafDurationFromSchedule(
+  type: Task["type"],
+  plannedStart: string | null,
+  plannedEnd: string | null,
+  plannedDurationDays: number | null,
+) {
+  if (type === "milestone") {
     return 0;
   }
 
-  if (task.plannedDurationDays !== null) {
-    return Math.max(task.plannedDurationDays, 1);
+  if (plannedDurationDays !== null) {
+    return Math.max(plannedDurationDays, 1);
   }
 
-  if (task.plannedStart && task.plannedEnd) {
-    return businessDaysInclusive(task.plannedStart, task.plannedEnd);
+  if (plannedStart && plannedEnd) {
+    return businessDaysInclusive(plannedStart, plannedEnd);
   }
 
   return 1;
 }
 
-function deriveStatus(taskStatus: TaskStatus, percentComplete: number, actualStart: string | null, actualEnd: string | null) {
-  if (taskStatus === "blocked") {
-    return "blocked" satisfies TaskStatus;
-  }
-
-  if (taskStatus === "done") {
-    return "done" satisfies TaskStatus;
-  }
-
-  if (taskStatus === "in_progress") {
-    return "in_progress" satisfies TaskStatus;
-  }
-
+function deriveStatus(_taskStatus: TaskStatus, percentComplete: number, actualStart: string | null, actualEnd: string | null) {
   if (percentComplete >= 100 || actualEnd) {
     return "done" satisfies TaskStatus;
   }
@@ -171,14 +187,27 @@ function buildDepths(children: Map<string | null, string[]>) {
   return depths;
 }
 
+function displayedStart(task: PlannedTask) {
+  return task.computedPlannedStart ?? task.plannedStart;
+}
+
 export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
   const tasks = [...snapshot.tasks].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
   const taskMap = new Map(tasks.map((task) => [task.id, task]));
   const children = buildChildren(tasks);
   const depths = buildDepths(children);
+  const checkpointsByTaskId = new Map<string, Checkpoint[]>();
   const dependenciesBySuccessor = new Map<string, Dependency[]>();
   const dependenciesByPredecessor = new Map<string, Dependency[]>();
   const issues: PlanningIssue[] = [];
+
+  for (const checkpoint of [...(snapshot.checkpoints ?? [])].sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name) || a.createdAt.localeCompare(b.createdAt),
+  )) {
+    const bucket = checkpointsByTaskId.get(checkpoint.taskId) ?? [];
+    bucket.push(checkpoint);
+    checkpointsByTaskId.set(checkpoint.taskId, bucket);
+  }
 
   for (const dependency of snapshot.dependencies) {
     const blockedBy = dependenciesBySuccessor.get(dependency.successorTaskId) ?? [];
@@ -203,7 +232,10 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     }
 
     const taskIssues: PlanningIssue[] = [];
+    const checkpoints = checkpointsByTaskId.get(task.id) ?? [];
+    const hasCheckpoints = task.type === "task" && checkpoints.length > 0;
     const durationDays = deriveLeafDuration(task);
+    const baselineDurationDays = deriveBaselineLeafDuration(task);
     const baseStart = clampToBusinessDay(task.plannedStart ?? isoToday());
     const baseEnd =
       task.plannedMode === "start_end" && task.plannedEnd
@@ -270,7 +302,18 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
               ? businessDaysInclusive(baseStart, baseEnd)
               : Math.max(durationDays, 1),
           );
-    const leafStatus = deriveStatus(task.status, task.percentComplete, task.actualStart, task.actualEnd);
+    const percentComplete = hasCheckpoints ? computeCheckpointPercent(checkpoints) : task.percentComplete;
+    const leafStatus = deriveStatus(task.status, percentComplete, task.actualStart, task.actualEnd);
+    const computedBaselineStart = task.baselinePlannedStart
+      ? clampToBusinessDay(task.baselinePlannedStart)
+      : null;
+    const computedBaselineEnd = computedBaselineStart
+      ? task.type === "milestone"
+        ? computedBaselineStart
+        : task.baselinePlannedEnd
+          ? clampToBusinessDay(task.baselinePlannedEnd)
+          : addDurationToStart(computedBaselineStart, Math.max(baselineDurationDays, 1))
+      : null;
 
     if (task.type !== "milestone" && task.plannedStart === null) {
       taskIssues.push(
@@ -296,21 +339,32 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
 
     planned.set(task.id, {
       ...task,
+      percentComplete,
       isSummary: false,
-      childIds: children.get(task.id) ?? [],
+      childIds: [],
       depth: depths.get(task.id) ?? 0,
-      hasChildren: (children.get(task.id) ?? []).length > 0,
+      hasChildren: false,
       blockedBy: dependenciesBySuccessor.get(task.id) ?? [],
       blocking: dependenciesByPredecessor.get(task.id) ?? [],
       computedPlannedStart: computedStart,
       computedPlannedEnd: computedEnd,
       computedPlannedDurationDays:
         task.type === "milestone" ? 0 : businessDaysInclusive(computedStart, computedEnd),
+      computedBaselinePlannedStart: computedBaselineStart,
+      computedBaselinePlannedEnd: computedBaselineEnd,
+      computedBaselinePlannedDurationDays:
+        computedBaselineStart && computedBaselineEnd
+          ? task.type === "milestone"
+            ? 0
+            : businessDaysInclusive(computedBaselineStart, computedBaselineEnd)
+          : null,
       computedActualStart: task.actualStart,
       computedActualEnd: task.actualEnd,
       rolledUpEffortDays: task.type === "milestone" ? 0 : Math.max(durationDays, 1),
-      rolledUpPercentComplete: task.percentComplete,
+      rolledUpPercentComplete: percentComplete,
       rolledUpStatus: leafStatus,
+      checkpoints,
+      isProgressDerived: hasCheckpoints,
       issues: taskIssues,
     });
   }
@@ -330,6 +384,8 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     const childPlans = childIds.map(rollup);
     const plannedStart = minIsoDate(childPlans.map((child) => child.computedPlannedStart));
     const plannedEnd = maxIsoDate(childPlans.map((child) => child.computedPlannedEnd));
+    const baselinePlannedStart = minIsoDate(childPlans.map((child) => child.computedBaselinePlannedStart));
+    const baselinePlannedEnd = maxIsoDate(childPlans.map((child) => child.computedBaselinePlannedEnd));
     const actualStart = minIsoDate(childPlans.map((child) => child.computedActualStart));
     const actualEnd = maxIsoDate(childPlans.map((child) => child.computedActualEnd));
     const rolledUpEffortDays = childPlans.reduce((total, child) => total + child.rolledUpEffortDays, 0);
@@ -342,20 +398,17 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
               0,
             ) / rolledUpEffortDays,
           );
-    const hasBlockedChild = childPlans.some((child) => child.rolledUpStatus === "blocked");
     const allDone = childPlans.length > 0 && childPlans.every((child) => child.rolledUpStatus === "done");
     const someStarted = childPlans.some(
       (child) =>
         child.rolledUpPercentComplete > 0 || child.computedActualStart !== null || child.rolledUpStatus === "in_progress",
     );
 
-    const summaryStatus: TaskStatus = hasBlockedChild
-      ? "blocked"
-      : allDone
-        ? "done"
-        : someStarted
-          ? "in_progress"
-          : "not_started";
+    const summaryStatus: TaskStatus = allDone
+      ? "done"
+      : someStarted
+        ? "in_progress"
+        : "not_started";
 
     const summaryPlan: PlannedTask = {
       ...current,
@@ -377,11 +430,19 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
       computedPlannedEnd: plannedEnd,
       computedPlannedDurationDays:
         plannedStart && plannedEnd ? businessDaysInclusive(plannedStart, plannedEnd) : null,
+      computedBaselinePlannedStart: baselinePlannedStart,
+      computedBaselinePlannedEnd: baselinePlannedEnd,
+      computedBaselinePlannedDurationDays:
+        baselinePlannedStart && baselinePlannedEnd
+          ? businessDaysInclusive(baselinePlannedStart, baselinePlannedEnd)
+          : null,
       computedActualStart: actualStart,
       computedActualEnd: actualEnd,
       rolledUpEffortDays,
       rolledUpPercentComplete: weightedPercent,
       rolledUpStatus: summaryStatus,
+      checkpoints: [],
+      isProgressDerived: false,
       issues: childPlans.flatMap((child) => child.issues),
     };
 
@@ -393,7 +454,46 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     rollup(rootTaskId);
   }
 
-  const rootPlans = (children.get(null) ?? []).map((taskId) => planned.get(taskId) ?? rollup(taskId));
+  const orderedChildren = new Map<string | null, string[]>();
+
+  for (const [parentId, childIds] of children.entries()) {
+    orderedChildren.set(
+      parentId,
+      [...childIds].sort((leftId, rightId) => {
+        const left = planned.get(leftId) ?? rollup(leftId);
+        const right = planned.get(rightId) ?? rollup(rightId);
+        const leftStart = displayedStart(left);
+        const rightStart = displayedStart(right);
+
+        if (leftStart && rightStart && leftStart !== rightStart) {
+          return leftStart.localeCompare(rightStart);
+        }
+
+        if (leftStart && !rightStart) {
+          return -1;
+        }
+
+        if (!leftStart && rightStart) {
+          return 1;
+        }
+
+        const leftTask = taskMap.get(leftId);
+        const rightTask = taskMap.get(rightId);
+        return (
+          (leftTask?.sortOrder ?? 0) - (rightTask?.sortOrder ?? 0) ||
+          (leftTask?.name ?? leftId).localeCompare(rightTask?.name ?? rightId)
+        );
+      }),
+    );
+  }
+
+  for (const plannedTask of planned.values()) {
+    const childIds = orderedChildren.get(plannedTask.id) ?? [];
+    plannedTask.childIds = childIds;
+    plannedTask.hasChildren = childIds.length > 0;
+  }
+
+  const rootPlans = (orderedChildren.get(null) ?? []).map((taskId) => planned.get(taskId) ?? rollup(taskId));
 
   const allTasks = tasks.map((task) => planned.get(task.id) ?? rollup(task.id));
   const rows: ProjectPlan["rows"] = [];
@@ -421,7 +521,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     }
   }
 
-  for (const rootTaskId of children.get(null) ?? []) {
+  for (const rootTaskId of orderedChildren.get(null) ?? []) {
     appendRows(rootTaskId);
   }
 
@@ -430,7 +530,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
   }
 
   const blockedTaskIds = allTasks
-    .filter((task) => task.rolledUpStatus === "blocked" || task.issues.some((issue) => issue.severity === "error"))
+    .filter((task) => task.issues.some((issue) => issue.severity === "error"))
     .map((task) => task.id);
   const upcomingTaskIds = allTasks
     .filter((task) => !task.isSummary && task.rolledUpStatus !== "done")
@@ -452,6 +552,13 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     project: snapshot.project,
     tasks: allTasks,
     dependencies: snapshot.dependencies,
+    pendingUndoActions: (snapshot.pendingDeleteActions ?? []).map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      subjectType: action.subjectType,
+      subjectLabel: action.subjectLabel,
+      expiresAt: action.expiresAt,
+    })),
     rows,
     issues,
     projectPercentComplete,

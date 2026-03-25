@@ -1,18 +1,102 @@
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lte, or } from "drizzle-orm";
 
-import type { Dependency, Project, Task } from "@/domain/planner";
-import { getDb } from "@/server/db/client";
-import { dependencies, projects, tasks } from "@/server/db/schema";
+import type { Checkpoint, Dependency, PendingDeleteAction, Project, Task } from "@/domain/planner";
+import { type AppDatabase, getDb } from "@/server/db/client";
+import { type CheckpointRow, checkpoints, dependencies, pendingDeleteActions, projects, tasks } from "@/server/db/schema";
 import {
+  mapCheckpointRow,
   mapDependencyRow,
+  mapPendingDeleteActionRow,
   mapProjectRow,
   mapTaskRow,
+  toCheckpointInsert,
   toDependencyInsert,
+  toPendingDeleteActionInsert,
   toProjectInsert,
   toTaskInsert,
 } from "@/server/repositories/mappers";
 
+function isMissingRelationError(error: unknown, relationName: string) {
+  const visited = new Set<unknown>();
+  const queue: unknown[] = [error];
+  const quotedRelation = `"${relationName}"`;
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+
+    if (!current || visited.has(current)) {
+      continue;
+    }
+
+    visited.add(current);
+
+    if (typeof current === "object") {
+      const record = current as Record<string, unknown>;
+      const message = typeof record.message === "string" ? record.message : "";
+      const code = typeof record.code === "string" ? record.code : "";
+
+      if (
+        code === "42P01" ||
+        message.includes(`relation ${quotedRelation} does not exist`) ||
+        message.includes(`table ${quotedRelation} does not exist`)
+      ) {
+        return true;
+      }
+
+      if ("cause" in record) {
+        queue.push(record.cause);
+      }
+    }
+  }
+
+  return false;
+}
+
+function isUnsupportedTransactionError(error: unknown) {
+  const visited = new Set<unknown>();
+  const queue: unknown[] = [error];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+
+    if (!current || visited.has(current)) {
+      continue;
+    }
+
+    visited.add(current);
+
+    if (typeof current === "object") {
+      const record = current as Record<string, unknown>;
+      const message = typeof record.message === "string" ? record.message : "";
+
+      if (message.includes("No transactions support in neon-http driver")) {
+        return true;
+      }
+
+      if ("cause" in record) {
+        queue.push(record.cause);
+      }
+    }
+  }
+
+  return false;
+}
+
 export class ProjectRepository {
+  async withTransaction<T>(run: (tx: AppDatabase) => Promise<T>) {
+    const db = await getDb();
+
+    try {
+      return await db.transaction((tx) => run(tx as unknown as AppDatabase));
+    } catch (error) {
+      if (!isUnsupportedTransactionError(error)) {
+        throw error;
+      }
+
+      return run(db);
+    }
+  }
+
   async listProjects() {
     const db = await getDb();
     const rows = await db.select().from(projects).orderBy(asc(projects.updatedAt));
@@ -28,13 +112,16 @@ export class ProjectRepository {
     return row ? mapProjectRow(row) : null;
   }
 
-  async getProjectSnapshot(projectId: string) {
+  async getProjectSnapshot(projectId: string, currentTime = new Date().toISOString()) {
     const db = await getDb();
     const project = await this.getProject(projectId);
 
     if (!project) {
       return null;
     }
+
+    await this.purgeExpiredPendingDeleteActions(projectId, currentTime);
+    const nowIso = currentTime;
 
     const taskRows = await db
       .select()
@@ -46,11 +133,57 @@ export class ProjectRepository {
       .from(dependencies)
       .where(eq(dependencies.projectId, projectId))
       .orderBy(asc(dependencies.createdAt));
+    let checkpointRows: CheckpointRow[];
+
+    if (taskRows.length === 0) {
+      checkpointRows = [];
+    } else {
+      try {
+        checkpointRows = await db
+          .select()
+          .from(checkpoints)
+          .where(
+            inArray(
+              checkpoints.taskId,
+              taskRows.map((row) => row.id),
+            ),
+          )
+          .orderBy(asc(checkpoints.taskId), asc(checkpoints.sortOrder), asc(checkpoints.createdAt));
+      } catch (error) {
+        if (!isMissingRelationError(error, "checkpoints")) {
+          throw error;
+        }
+
+        console.warn('Checkpoint table is missing; returning project plans without checkpoints until the latest migration is applied.');
+        checkpointRows = [];
+      }
+    }
+
+    let pendingDeleteActionRows: PendingDeleteAction[];
+
+    try {
+      pendingDeleteActionRows = (
+        await db
+          .select()
+          .from(pendingDeleteActions)
+          .where(and(eq(pendingDeleteActions.projectId, projectId), gt(pendingDeleteActions.expiresAt, nowIso)))
+          .orderBy(asc(pendingDeleteActions.expiresAt), asc(pendingDeleteActions.createdAt))
+      ).map(mapPendingDeleteActionRow);
+    } catch (error) {
+      if (!isMissingRelationError(error, "pending_delete_actions")) {
+        throw error;
+      }
+
+      console.warn("Pending delete actions table is missing; returning project plans without undo metadata until the latest migration is applied.");
+      pendingDeleteActionRows = [];
+    }
 
     return {
       project,
       tasks: taskRows.map(mapTaskRow),
       dependencies: dependencyRows.map(mapDependencyRow),
+      checkpoints: checkpointRows.map(mapCheckpointRow),
+      pendingDeleteActions: pendingDeleteActionRows,
     };
   }
 
@@ -67,6 +200,7 @@ export class ProjectRepository {
       .set({
         name: values.name,
         description: values.description,
+        baselineCapturedAt: values.baselineCapturedAt,
         updatedAt: values.updatedAt,
       })
       .where(eq(projects.id, projectId));
@@ -93,6 +227,82 @@ export class ProjectRepository {
 
     const db = await getDb();
     await db.insert(dependencies).values(dependencyList.map(toDependencyInsert));
+  }
+
+  async insertCheckpoints(checkpointList: Checkpoint[]) {
+    if (checkpointList.length === 0) {
+      return;
+    }
+
+    const db = await getDb();
+    await db.insert(checkpoints).values(checkpointList.map(toCheckpointInsert));
+  }
+
+  async createPendingDeleteAction(action: PendingDeleteAction) {
+    const db = await getDb();
+    try {
+      await db.insert(pendingDeleteActions).values(toPendingDeleteActionInsert(action));
+    } catch (error) {
+      if (!isMissingRelationError(error, "pending_delete_actions")) {
+        throw error;
+      }
+
+      console.warn("Pending delete actions table is missing; skipping undo capture until the latest migration is applied.");
+    }
+
+    return action;
+  }
+
+  async getPendingDeleteAction(actionId: string) {
+    const db = await getDb();
+    let row;
+
+    try {
+      [row] = await db
+        .select()
+        .from(pendingDeleteActions)
+        .where(eq(pendingDeleteActions.id, actionId))
+        .limit(1);
+    } catch (error) {
+      if (!isMissingRelationError(error, "pending_delete_actions")) {
+        throw error;
+      }
+
+      console.warn("Pending delete actions table is missing; undo is unavailable until the latest migration is applied.");
+      return null;
+    }
+
+    return row ? mapPendingDeleteActionRow(row) : null;
+  }
+
+  async purgeExpiredPendingDeleteActions(projectId?: string, currentTime = new Date().toISOString()) {
+    const db = await getDb();
+    const where = projectId
+      ? and(eq(pendingDeleteActions.projectId, projectId), lte(pendingDeleteActions.expiresAt, currentTime))
+      : lte(pendingDeleteActions.expiresAt, currentTime);
+
+    try {
+      await db.delete(pendingDeleteActions).where(where);
+    } catch (error) {
+      if (!isMissingRelationError(error, "pending_delete_actions")) {
+        throw error;
+      }
+
+      console.warn("Pending delete actions table is missing; skipping undo expiry cleanup until the latest migration is applied.");
+    }
+  }
+
+  async deletePendingDeleteAction(actionId: string) {
+    const db = await getDb();
+    try {
+      await db.delete(pendingDeleteActions).where(eq(pendingDeleteActions.id, actionId));
+    } catch (error) {
+      if (!isMissingRelationError(error, "pending_delete_actions")) {
+        throw error;
+      }
+
+      console.warn("Pending delete actions table is missing; nothing to delete for undo metadata.");
+    }
   }
 
   async getTask(taskId: string) {
@@ -124,6 +334,9 @@ export class ProjectRepository {
         plannedStart: values.plannedStart,
         plannedEnd: values.plannedEnd,
         plannedDurationDays: values.plannedDurationDays,
+        baselinePlannedStart: values.baselinePlannedStart,
+        baselinePlannedEnd: values.baselinePlannedEnd,
+        baselinePlannedDurationDays: values.baselinePlannedDurationDays,
         actualStart: values.actualStart,
         actualEnd: values.actualEnd,
         status: values.status,
@@ -209,6 +422,58 @@ export class ProjectRepository {
     const db = await getDb();
     await db.insert(dependencies).values(toDependencyInsert(dependency));
     return dependency;
+  }
+
+  async listCheckpointsForTask(taskId: string) {
+    const db = await getDb();
+    const rows = await db
+      .select()
+      .from(checkpoints)
+      .where(eq(checkpoints.taskId, taskId))
+      .orderBy(asc(checkpoints.sortOrder), asc(checkpoints.createdAt));
+
+    return rows.map(mapCheckpointRow);
+  }
+
+  async getCheckpoint(checkpointId: string) {
+    const db = await getDb();
+    const row = await db.query.checkpoints.findFirst({
+      where: eq(checkpoints.id, checkpointId),
+    });
+
+    return row ? mapCheckpointRow(row) : null;
+  }
+
+  async createCheckpoint(checkpoint: Checkpoint) {
+    const db = await getDb();
+    await db.insert(checkpoints).values(toCheckpointInsert(checkpoint));
+    return checkpoint;
+  }
+
+  async updateCheckpoint(checkpointId: string, values: Partial<Checkpoint>) {
+    const db = await getDb();
+    await db
+      .update(checkpoints)
+      .set({
+        name: values.name,
+        percentComplete: values.percentComplete,
+        weightPoints: values.weightPoints,
+        sortOrder: values.sortOrder,
+        updatedAt: values.updatedAt,
+      })
+      .where(eq(checkpoints.id, checkpointId));
+  }
+
+  async deleteCheckpoint(checkpointId: string) {
+    const db = await getDb();
+    const checkpoint = await this.getCheckpoint(checkpointId);
+
+    if (!checkpoint) {
+      return null;
+    }
+
+    await db.delete(checkpoints).where(eq(checkpoints.id, checkpointId));
+    return checkpoint.taskId;
   }
 
   async updateDependency(dependencyId: string, values: Partial<Dependency>) {

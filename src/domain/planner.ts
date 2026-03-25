@@ -1,19 +1,24 @@
 import { z } from "zod";
 
 export const taskTypes = ["summary", "task", "milestone"] as const;
-export const taskStatuses = ["not_started", "in_progress", "blocked", "done"] as const;
+export const taskStatuses = ["not_started", "in_progress", "done"] as const;
 export const dependencyTypes = ["FS", "SS", "FF", "SF"] as const;
 export const plannedModes = ["start_duration", "start_end"] as const;
+export const pendingDeleteActionKinds = ["task", "checkpoint", "dependency"] as const;
+export const undoSubjectTypes = ["task", "section", "milestone", "checkpoint", "dependency"] as const;
 
 export type TaskType = (typeof taskTypes)[number];
 export type TaskStatus = (typeof taskStatuses)[number];
 export type DependencyType = (typeof dependencyTypes)[number];
 export type PlannedMode = (typeof plannedModes)[number];
+export type PendingDeleteActionKind = (typeof pendingDeleteActionKinds)[number];
+export type UndoSubjectType = (typeof undoSubjectTypes)[number];
 
 export const projectSchema = z.object({
   id: z.string(),
   name: z.string().min(1),
   description: z.string(),
+  baselineCapturedAt: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -30,6 +35,9 @@ export const taskSchema = z.object({
   plannedStart: z.string().nullable(),
   plannedEnd: z.string().nullable(),
   plannedDurationDays: z.number().int().nullable(),
+  baselinePlannedStart: z.string().nullable(),
+  baselinePlannedEnd: z.string().nullable(),
+  baselinePlannedDurationDays: z.number().int().nullable(),
   actualStart: z.string().nullable(),
   actualEnd: z.string().nullable(),
   status: z.enum(taskStatuses),
@@ -48,6 +56,25 @@ export const dependencySchema = z.object({
   lagDays: z.number().int(),
   createdAt: z.string(),
   updatedAt: z.string(),
+});
+
+export const checkpointSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  name: z.string().min(1),
+  percentComplete: z.number().int().min(0).max(100),
+  weightPoints: z.number().int().min(1).max(8),
+  sortOrder: z.number().int(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export const pendingUndoActionSchema = z.object({
+  id: z.string(),
+  kind: z.enum(pendingDeleteActionKinds),
+  subjectType: z.enum(undoSubjectTypes),
+  subjectLabel: z.string(),
+  expiresAt: z.string(),
 });
 
 export const projectCreateSchema = z.object({
@@ -84,11 +111,32 @@ export const taskUpdateSchema = z
     plannedDurationDays: z.number().int().min(0).nullable().optional(),
     actualStart: z.string().nullable().optional(),
     actualEnd: z.string().nullable().optional(),
-    status: z.enum(taskStatuses).optional(),
     percentComplete: z.number().int().min(0).max(100).optional(),
     isExpanded: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, "At least one field is required.");
+
+export const taskWrapSchema = z.object({
+  childName: z.string().min(1).max(160).optional(),
+});
+
+export const checkpointCreateSchema = z.object({
+  name: z.string().min(1).max(160),
+  percentComplete: z.number().int().min(0).max(100).default(0),
+  weightPoints: z.number().int().min(1).max(8).default(1),
+});
+
+export const checkpointUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(160).optional(),
+    percentComplete: z.number().int().min(0).max(100).optional(),
+    weightPoints: z.number().int().min(1).max(8).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, "At least one field is required.");
+
+export const checkpointMoveSchema = z.object({
+  direction: z.enum(["up", "down"]),
+});
 
 export const dependencyCreateSchema = z.object({
   predecessorTaskId: z.string(),
@@ -104,12 +152,42 @@ export const dependencyUpdateSchema = dependencyCreateSchema
 export type Project = z.infer<typeof projectSchema>;
 export type Task = z.infer<typeof taskSchema>;
 export type Dependency = z.infer<typeof dependencySchema>;
+export type Checkpoint = z.infer<typeof checkpointSchema>;
+export type PendingUndoAction = z.infer<typeof pendingUndoActionSchema>;
+export type TaskPendingDeletePayload = {
+  kind: "task";
+  rootTaskId: string;
+  tasks: Task[];
+  dependencies: Dependency[];
+  checkpoints: Checkpoint[];
+};
+export type CheckpointPendingDeletePayload = {
+  kind: "checkpoint";
+  checkpoint: Checkpoint;
+};
+export type DependencyPendingDeletePayload = {
+  kind: "dependency";
+  dependency: Dependency;
+};
+export type PendingDeletePayload =
+  | TaskPendingDeletePayload
+  | CheckpointPendingDeletePayload
+  | DependencyPendingDeletePayload;
+export type PendingDeleteAction = PendingUndoAction & {
+  projectId: string;
+  createdAt: string;
+  payload: PendingDeletePayload;
+};
 export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;
 export type ProjectUpdateInput = z.infer<typeof projectUpdateSchema>;
 export type TaskCreateInput = z.infer<typeof taskCreateSchema>;
 export type TaskUpdateInput = z.infer<typeof taskUpdateSchema>;
+export type TaskWrapInput = z.infer<typeof taskWrapSchema>;
 export type DependencyCreateInput = z.infer<typeof dependencyCreateSchema>;
 export type DependencyUpdateInput = z.infer<typeof dependencyUpdateSchema>;
+export type CheckpointCreateInput = z.infer<typeof checkpointCreateSchema>;
+export type CheckpointUpdateInput = z.infer<typeof checkpointUpdateSchema>;
+export type CheckpointMoveInput = z.infer<typeof checkpointMoveSchema>;
 
 export type PlanningIssueSeverity = "error" | "warning" | "info";
 
@@ -130,11 +208,16 @@ export type PlannedTask = Task & {
   computedPlannedStart: string | null;
   computedPlannedEnd: string | null;
   computedPlannedDurationDays: number | null;
+  computedBaselinePlannedStart: string | null;
+  computedBaselinePlannedEnd: string | null;
+  computedBaselinePlannedDurationDays: number | null;
   computedActualStart: string | null;
   computedActualEnd: string | null;
   rolledUpEffortDays: number;
   rolledUpPercentComplete: number;
   rolledUpStatus: TaskStatus;
+  checkpoints: Checkpoint[];
+  isProgressDerived: boolean;
   issues: PlanningIssue[];
 };
 
@@ -149,6 +232,7 @@ export type ProjectPlan = {
   project: Project;
   tasks: PlannedTask[];
   dependencies: Dependency[];
+  pendingUndoActions: PendingUndoAction[];
   rows: PlannerRow[];
   issues: PlanningIssue[];
   projectPercentComplete: number;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Dependency, Project, Task } from "@/domain/planner";
+import type { Checkpoint, Dependency, Project, Task } from "@/domain/planner";
 import { duplicateProjectSnapshot } from "@/server/services/project-duplication";
 
 function makeProject(): Project {
@@ -9,6 +9,7 @@ function makeProject(): Project {
     id: "project_source",
     name: "Source Plan",
     description: "Template candidate",
+    baselineCapturedAt: null,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
   };
@@ -25,6 +26,9 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name">): Task {
     plannedStart: "2026-03-16",
     plannedEnd: null,
     plannedDurationDays: 2,
+    baselinePlannedStart: null,
+    baselinePlannedEnd: null,
+    baselinePlannedDurationDays: null,
     actualStart: null,
     actualEnd: null,
     status: "not_started",
@@ -47,6 +51,17 @@ function makeDependency(dependency: Partial<Dependency> & Pick<Dependency, "id" 
   };
 }
 
+function makeCheckpoint(checkpoint: Partial<Checkpoint> & Pick<Checkpoint, "id" | "taskId" | "name">): Checkpoint {
+  return {
+    percentComplete: 25,
+    weightPoints: 2,
+    sortOrder: 10,
+    createdAt: "2026-03-18T00:00:00.000Z",
+    updatedAt: "2026-03-18T00:00:00.000Z",
+    ...checkpoint,
+  };
+}
+
 test("duplicates tasks and dependencies with remapped ids", () => {
   let sequence = 0;
   const duplicated = duplicateProjectSnapshot(
@@ -58,6 +73,7 @@ test("duplicates tasks and dependencies with remapped ids", () => {
         makeTask({ id: "task_b", name: "B", parentId: "summary", sortOrder: 20 }),
       ],
       dependencies: [makeDependency({ id: "dep_1", predecessorTaskId: "task_a", successorTaskId: "task_b" })],
+      checkpoints: [makeCheckpoint({ id: "checkpoint_1", taskId: "task_a", name: "Checkpoint A" })],
     },
     {
       projectId: "project_copy",
@@ -71,6 +87,7 @@ test("duplicates tasks and dependencies with remapped ids", () => {
   assert.equal(duplicated.project.name, "Source Plan Copy");
   assert.equal(duplicated.tasks.length, 3);
   assert.equal(duplicated.dependencies.length, 1);
+  assert.equal(duplicated.checkpoints.length, 1);
   assert.equal(duplicated.tasks.every((task) => task.projectId === "project_copy"), true);
   assert.equal(duplicated.tasks.some((task) => task.id === "task_a"), false);
   assert.equal(duplicated.tasks.some((task) => task.id === "task_b"), false);
@@ -85,4 +102,11 @@ test("duplicates tasks and dependencies with remapped ids", () => {
   assert.equal(taskB?.parentId, summary?.id);
   assert.equal(duplicated.dependencies[0]?.predecessorTaskId, taskA?.id);
   assert.equal(duplicated.dependencies[0]?.successorTaskId, taskB?.id);
+  assert.equal(duplicated.checkpoints[0]?.taskId, taskA?.id);
+  assert.equal(duplicated.checkpoints[0]?.percentComplete, 0);
+  assert.equal(duplicated.project.baselineCapturedAt, null);
+  assert.equal(taskA?.baselinePlannedStart, null);
+  assert.equal(taskA?.actualStart, null);
+  assert.equal(taskA?.percentComplete, 0);
+  assert.equal(taskA?.status, "not_started");
 });

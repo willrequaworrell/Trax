@@ -5,19 +5,15 @@ export function normalizeStoredTaskStatus(task: Pick<Task, "type" | "status" | "
     return task.status;
   }
 
-  if (task.status === "blocked") {
-    return "blocked";
-  }
-
   if (task.actualEnd || task.percentComplete >= 100) {
     return "done";
   }
 
-  if ((task.percentComplete > 0 || task.actualStart) && task.status === "not_started") {
+  if (task.percentComplete > 0 || task.actualStart) {
     return "in_progress";
   }
 
-  return task.status;
+  return "not_started";
 }
 
 export function findTaskNormalizationUpdates(tasks: Task[]) {

@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { computeProjectPlan } from "@/domain/scheduler";
-import type { Dependency, Project, Task } from "@/domain/planner";
+import type { Checkpoint, Dependency, Project, Task } from "@/domain/planner";
 
 function makeProject(): Project {
   return {
     id: "project_1",
     name: "Planner",
     description: "",
+    baselineCapturedAt: null,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
   };
@@ -25,6 +26,9 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name">): Task {
     plannedStart: "2026-03-16",
     plannedEnd: null,
     plannedDurationDays: 1,
+    baselinePlannedStart: null,
+    baselinePlannedEnd: null,
+    baselinePlannedDurationDays: null,
     actualStart: null,
     actualEnd: null,
     status: "not_started",
@@ -47,6 +51,17 @@ function makeDependency(dependency: Partial<Dependency> & Pick<Dependency, "id" 
   };
 }
 
+function makeCheckpoint(checkpoint: Partial<Checkpoint> & Pick<Checkpoint, "id" | "taskId" | "name">): Checkpoint {
+  return {
+    percentComplete: 0,
+    weightPoints: 1,
+    sortOrder: 0,
+    createdAt: "2026-03-18T00:00:00.000Z",
+    updatedAt: "2026-03-18T00:00:00.000Z",
+    ...checkpoint,
+  };
+}
+
 test("supports finish-to-start rescheduling", () => {
     const plan = computeProjectPlan({
       project: makeProject(),
@@ -55,6 +70,7 @@ test("supports finish-to-start rescheduling", () => {
         makeTask({ id: "b", name: "B", plannedStart: "2026-03-16", plannedDurationDays: 1 }),
       ],
       dependencies: [makeDependency({ id: "dep_1", predecessorTaskId: "a", successorTaskId: "b", type: "FS" })],
+      checkpoints: [],
     });
 
     const taskB = plan.tasks.find((task) => task.id === "b");
@@ -69,6 +85,7 @@ test("supports start-to-start dependencies", () => {
         makeTask({ id: "b", name: "B", plannedStart: "2026-03-14", plannedDurationDays: 2 }),
       ],
       dependencies: [makeDependency({ id: "dep_1", predecessorTaskId: "a", successorTaskId: "b", type: "SS" })],
+      checkpoints: [],
     });
 
     const taskB = plan.tasks.find((task) => task.id === "b");
@@ -83,6 +100,7 @@ test("supports lag offsets", () => {
         makeTask({ id: "b", name: "B", plannedStart: "2026-03-16", plannedDurationDays: 1 }),
       ],
       dependencies: [makeDependency({ id: "dep_1", predecessorTaskId: "a", successorTaskId: "b", type: "FS", lagDays: 2 })],
+      checkpoints: [],
     });
 
     const taskB = plan.tasks.find((task) => task.id === "b");
@@ -98,6 +116,7 @@ test("rolls up summary task spans and effort", () => {
         makeTask({ id: "b", name: "B", parentId: "summary", sortOrder: 20, plannedStart: "2026-03-19", plannedDurationDays: 2 }),
       ],
       dependencies: [],
+      checkpoints: [],
     });
 
     const summary = plan.tasks.find((task) => task.id === "summary");
@@ -105,6 +124,41 @@ test("rolls up summary task spans and effort", () => {
   assert.equal(summary?.computedPlannedEnd, "2026-03-20");
   assert.equal(summary?.rolledUpEffortDays, 5);
   assert.equal(plan.projectPercentComplete, 0);
+});
+
+test("rolls up baseline spans for summary tasks", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({ id: "summary", name: "Build", type: "summary", plannedMode: null, plannedStart: null, plannedDurationDays: null }),
+      makeTask({
+        id: "a",
+        name: "A",
+        parentId: "summary",
+        sortOrder: 10,
+        plannedStart: "2026-03-20",
+        plannedDurationDays: 3,
+        baselinePlannedStart: "2026-03-16",
+        baselinePlannedDurationDays: 3,
+      }),
+      makeTask({
+        id: "b",
+        name: "B",
+        parentId: "summary",
+        sortOrder: 20,
+        plannedStart: "2026-03-25",
+        plannedDurationDays: 2,
+        baselinePlannedStart: "2026-03-19",
+        baselinePlannedDurationDays: 2,
+      }),
+    ],
+    dependencies: [],
+    checkpoints: [],
+  });
+
+  const summary = plan.tasks.find((task) => task.id === "summary");
+  assert.equal(summary?.computedBaselinePlannedStart, "2026-03-16");
+  assert.equal(summary?.computedBaselinePlannedEnd, "2026-03-20");
 });
 
 test("computes project percent complete from weighted root effort", () => {
@@ -117,6 +171,7 @@ test("computes project percent complete from weighted root effort", () => {
       makeTask({ id: "c", name: "C", plannedStart: "2026-03-20", plannedDurationDays: 2, percentComplete: 50 }),
     ],
     dependencies: [],
+    checkpoints: [],
   });
 
   assert.equal(plan.projectPercentComplete, 67);
@@ -133,40 +188,109 @@ test("flags cycles", () => {
         makeDependency({ id: "dep_1", predecessorTaskId: "a", successorTaskId: "b" }),
         makeDependency({ id: "dep_2", predecessorTaskId: "b", successorTaskId: "a" }),
       ],
+      checkpoints: [],
     });
 
     assert.equal(plan.issues.some((issue) => issue.message.includes("cycle")), true);
   });
 
-test("respects explicitly blocked and done statuses", () => {
+test("derives in-progress and done statuses from execution data", () => {
   const plan = computeProjectPlan({
     project: makeProject(),
     tasks: [
-      makeTask({ id: "blocked", name: "Blocked", status: "blocked", percentComplete: 40 }),
-      makeTask({ id: "done", name: "Done", status: "done", percentComplete: 0 }),
+      makeTask({ id: "in_progress", name: "In progress", percentComplete: 40 }),
+      makeTask({ id: "done", name: "Done", percentComplete: 0, actualEnd: "2026-03-16" }),
     ],
     dependencies: [],
+    checkpoints: [],
   });
 
-  const blocked = plan.tasks.find((task) => task.id === "blocked");
+  const started = plan.tasks.find((task) => task.id === "in_progress");
   const done = plan.tasks.find((task) => task.id === "done");
-  assert.equal(blocked?.rolledUpStatus, "blocked");
+  assert.equal(started?.rolledUpStatus, "in_progress");
   assert.equal(done?.rolledUpStatus, "done");
 });
 
-test("rolls blocked state to the parent summary without changing scheduling", () => {
+test("rolls in-progress state to the parent summary without changing scheduling", () => {
   const plan = computeProjectPlan({
     project: makeProject(),
     tasks: [
       makeTask({ id: "summary", name: "Build", type: "summary", plannedMode: null, plannedStart: null, plannedDurationDays: null }),
-      makeTask({ id: "a", name: "Blocked child", parentId: "summary", sortOrder: 10, status: "blocked", plannedStart: "2026-03-16", plannedDurationDays: 2 }),
+      makeTask({ id: "a", name: "Started child", parentId: "summary", sortOrder: 10, percentComplete: 50, plannedStart: "2026-03-16", plannedDurationDays: 2 }),
       makeTask({ id: "b", name: "Open child", parentId: "summary", sortOrder: 20, plannedStart: "2026-03-18", plannedDurationDays: 2 }),
     ],
     dependencies: [],
+    checkpoints: [],
   });
 
   const summary = plan.tasks.find((task) => task.id === "summary");
-  const blockedChild = plan.tasks.find((task) => task.id === "a");
-  assert.equal(blockedChild?.computedPlannedStart, "2026-03-16");
-  assert.equal(summary?.rolledUpStatus, "blocked");
+  const startedChild = plan.tasks.find((task) => task.id === "a");
+  assert.equal(startedChild?.computedPlannedStart, "2026-03-16");
+  assert.equal(summary?.rolledUpStatus, "in_progress");
+});
+
+test("derives task progress from checkpoints without changing task scheduling", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({ id: "task", name: "Build automation", plannedStart: "2026-03-16", plannedDurationDays: 5 }),
+    ],
+    dependencies: [],
+    checkpoints: [
+      makeCheckpoint({ id: "checkpoint_1", taskId: "task", name: "Map fields", percentComplete: 100, weightPoints: 1, sortOrder: 10 }),
+      makeCheckpoint({ id: "checkpoint_2", taskId: "task", name: "Handle errors", percentComplete: 50, weightPoints: 3, sortOrder: 20 }),
+    ],
+  });
+
+  const task = plan.tasks.find((item) => item.id === "task");
+  assert.equal(task?.computedPlannedStart, "2026-03-16");
+  assert.equal(task?.computedPlannedEnd, "2026-03-20");
+  assert.equal(task?.rolledUpPercentComplete, 63);
+  assert.equal(task?.rolledUpStatus, "in_progress");
+  assert.equal(task?.isProgressDerived, true);
+  assert.deepEqual(task?.checkpoints.map((checkpoint) => checkpoint.id), ["checkpoint_1", "checkpoint_2"]);
+});
+
+test("sorts sibling rows by displayed start date within each parent group", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({ id: "summary", name: "Phase", type: "summary", plannedMode: null, plannedStart: null, plannedDurationDays: null }),
+      makeTask({ id: "late", name: "Late", parentId: "summary", sortOrder: 10, plannedStart: "2026-03-20", plannedDurationDays: 2 }),
+      makeTask({ id: "early", name: "Early", parentId: "summary", sortOrder: 30, plannedStart: "2026-03-16", plannedDurationDays: 1 }),
+      makeTask({ id: "same_day_b", name: "Same day B", parentId: "summary", sortOrder: 20, plannedStart: "2026-03-18", plannedDurationDays: 1 }),
+      makeTask({ id: "same_day_a", name: "Same day A", parentId: "summary", sortOrder: 5, plannedStart: "2026-03-18", plannedDurationDays: 1 }),
+    ],
+    dependencies: [],
+    checkpoints: [],
+  });
+
+  const summary = plan.tasks.find((item) => item.id === "summary");
+  assert.deepEqual(summary?.childIds, ["early", "same_day_a", "same_day_b", "late"]);
+  assert.deepEqual(plan.rows.map((row) => row.taskId), ["summary", "early", "same_day_a", "same_day_b", "late"]);
+});
+
+test("sorts siblings by computed forecast start when stored starts are stale", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({ id: "summary", name: "Phase", type: "summary", plannedMode: null, plannedStart: null, plannedDurationDays: null }),
+      makeTask({ id: "anchor", name: "Anchor", parentId: "summary", sortOrder: 10, plannedStart: "2026-03-16", plannedDurationDays: 3 }),
+      makeTask({ id: "blocked", name: "Blocked", parentId: "summary", sortOrder: 20, plannedStart: "2026-03-16", plannedDurationDays: 1 }),
+      makeTask({ id: "free", name: "Free", parentId: "summary", sortOrder: 30, plannedStart: "2026-03-17", plannedDurationDays: 1 }),
+    ],
+    dependencies: [
+      makeDependency({ id: "dep_1", predecessorTaskId: "anchor", successorTaskId: "blocked", type: "FS" }),
+    ],
+    checkpoints: [],
+  });
+
+  const summary = plan.tasks.find((item) => item.id === "summary");
+  const blocked = plan.tasks.find((item) => item.id === "blocked");
+  const free = plan.tasks.find((item) => item.id === "free");
+
+  assert.equal(blocked?.plannedStart, "2026-03-16");
+  assert.equal(blocked?.computedPlannedStart, "2026-03-18");
+  assert.equal(free?.computedPlannedStart, "2026-03-17");
+  assert.deepEqual(summary?.childIds, ["anchor", "free", "blocked"]);
 });

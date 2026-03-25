@@ -11,8 +11,11 @@ export async function POST(request: Request, context: Context) {
   try {
     await requireApiSession();
     const { projectId } = await context.params;
-    const payload: { name?: string } = await readJson<{ name?: string }>(request).catch(() => ({}));
-    const plan = await duplicateProject(projectId, payload.name);
+    const payload: { name?: string; startDate?: string | null } = await readJson<{
+      name?: string;
+      startDate?: string | null;
+    }>(request).catch(() => ({}));
+    const plan = await duplicateProject(projectId, payload.name, payload.startDate ?? null);
     return plan ? jsonOk(plan, { status: 201 }) : jsonError("Project not found.", 404);
   } catch (error) {
     return jsonServiceError(error, "Failed to duplicate project.");

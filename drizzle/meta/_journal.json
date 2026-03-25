@@ -8,6 +8,27 @@
       "when": 1773947107280,
       "tag": "0000_burly_reptil",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1774071755680,
+      "tag": "0001_minor_silver_sable",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1774403921125,
+      "tag": "0002_clumsy_sugar_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1774410273086,
+      "tag": "0003_supreme_bullseye",
+      "breakpoints": true
     }
   ]
 }

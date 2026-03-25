@@ -4,10 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { CaretDown, CaretLeft, CaretRight, Kanban, Plus, SignOut } from "@phosphor-icons/react";
+import { CaretDown, CaretLeft, CaretRight, Plus, SignOut, SquaresFour } from "@phosphor-icons/react";
 import { signOut } from "next-auth/react";
 
 import type { Project } from "@/domain/planner";
+import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { CollapsibleContent, CollapsibleRoot } from "@/components/ui/collapsible";
 import {
@@ -81,9 +82,7 @@ export function WorkspaceSidebar({ projects, activeProjectId }: Props) {
       <Sidebar className={sidebarOpen ? "h-screen" : "h-screen w-16"}>
         <SidebarHeader className="space-y-4">
           <div className={sidebarOpen ? "flex items-center gap-3 px-2" : "flex items-center justify-center"}>
-            <div className="flex size-10 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-              <Kanban className="size-5" />
-            </div>
+            <BrandMark />
             {sidebarOpen ? <p className="text-lg font-semibold tracking-tight">Traxly</p> : null}
           </div>
           <div className={sidebarOpen ? "flex justify-end" : "flex justify-center"}>
@@ -150,7 +149,7 @@ export function WorkspaceSidebar({ projects, activeProjectId }: Props) {
                   window.location.href = "/";
                 }}
               >
-                <Kanban className="size-4" />
+                <SquaresFour className="size-4" />
               </Button>
               <Button
                 type="button"

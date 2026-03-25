@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { ArrowSquareOut, Copy, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
 
 import type { Project } from "@/domain/planner";
+import { DatePickerField } from "@/features/planner/components/date-picker-field";
 import { ProjectRenameDialog } from "@/features/planner/components/project-rename-dialog";
 import { WorkspaceSidebar } from "@/features/planner/components/workspace-sidebar";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,9 @@ export function ProjectList({ initialProjects }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [renameProjectId, setRenameProjectId] = useState<string | null>(null);
+  const [duplicateProjectId, setDuplicateProjectId] = useState<string | null>(null);
+  const [duplicateName, setDuplicateName] = useState("");
+  const [duplicateStartDate, setDuplicateStartDate] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const filteredProjects = useMemo(() => {
@@ -101,13 +105,13 @@ export function ProjectList({ initialProjects }: Props) {
     });
   }
 
-  async function duplicateProject(projectId: string, name: string) {
+  async function duplicateProject(projectId: string, name: string, startDate: string | null) {
     startTransition(async () => {
       try {
         const response = await fetch(`/api/projects/${projectId}/duplicate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: `${name} Copy` }),
+          body: JSON.stringify({ name, startDate }),
         });
         const payload = await response.json();
 
@@ -116,6 +120,9 @@ export function ProjectList({ initialProjects }: Props) {
         }
 
         setProjects((current) => [...current, payload.project]);
+        setDuplicateProjectId(null);
+        setDuplicateName("");
+        setDuplicateStartDate(null);
         toast.success("Project duplicated");
         window.location.href = `/projects/${payload.project.id}`;
       } catch (error) {
@@ -155,6 +162,9 @@ export function ProjectList({ initialProjects }: Props) {
 
   const projectBeingRenamed = renameProjectId
     ? projects.find((project) => project.id === renameProjectId) ?? null
+    : null;
+  const projectBeingDuplicated = duplicateProjectId
+    ? projects.find((project) => project.id === duplicateProjectId) ?? null
     : null;
 
   return (
@@ -242,7 +252,13 @@ export function ProjectList({ initialProjects }: Props) {
                             <PencilSimple className="size-4" />
                             Rename project
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => void duplicateProject(project.id, project.name)}>
+                          <DropdownMenuItem
+                            onClick={() => {
+                              setDuplicateProjectId(project.id);
+                              setDuplicateName(`${project.name} Copy`);
+                              setDuplicateStartDate(null);
+                            }}
+                          >
                             <Copy className="size-4" />
                             Duplicate project
                           </DropdownMenuItem>
@@ -312,6 +328,62 @@ export function ProjectList({ initialProjects }: Props) {
         }}
         isPending={isPending}
       />
+
+      <DialogRoot
+        open={projectBeingDuplicated !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDuplicateProjectId(null);
+            setDuplicateName("");
+            setDuplicateStartDate(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Duplicate project</DialogTitle>
+            <DialogDescription>
+              Create a new project from this template and optionally shift the forecast so it starts on a different date.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Project name</label>
+              <Input value={duplicateName} onChange={(event) => setDuplicateName(event.target.value)} placeholder="Customer rollout Copy" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Start date</label>
+              <DatePickerField value={duplicateStartDate} onChange={setDuplicateStartDate} />
+              <p className="text-xs text-muted-foreground">
+                Leave blank to keep the copied project on the same forecast dates as the source.
+              </p>
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDuplicateProjectId(null);
+                setDuplicateName("");
+                setDuplicateStartDate(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (projectBeingDuplicated) {
+                  void duplicateProject(projectBeingDuplicated.id, duplicateName.trim() || `${projectBeingDuplicated.name} Copy`, duplicateStartDate);
+                }
+              }}
+              disabled={isPending || !duplicateName.trim()}
+            >
+              {isPending ? <Spinner /> : null}
+              Duplicate project
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
     </>
   );
 }

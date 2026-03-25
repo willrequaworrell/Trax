@@ -1,16 +1,127 @@
-import { projectCreateSchema, projectUpdateSchema, taskCreateSchema, taskUpdateSchema, dependencyCreateSchema, dependencyUpdateSchema, type DependencyCreateInput, type DependencyUpdateInput, type PlannedMode, type Project, type ProjectCreateInput, type ProjectExport, type ProjectPlan, type ProjectUpdateInput, type Task, type TaskCreateInput, type TaskCreateResult, type TaskUpdateInput } from "@/domain/planner";
+import { and, eq, inArray, or } from "drizzle-orm";
+import {
+  checkpointCreateSchema,
+  checkpointMoveSchema,
+  checkpointUpdateSchema,
+  projectCreateSchema,
+  projectUpdateSchema,
+  taskCreateSchema,
+  taskUpdateSchema,
+  taskWrapSchema,
+  dependencyCreateSchema,
+  dependencyUpdateSchema,
+  type Checkpoint,
+  type CheckpointCreateInput,
+  type CheckpointMoveInput,
+  type CheckpointUpdateInput,
+  type Dependency,
+  type DependencyCreateInput,
+  type DependencyUpdateInput,
+  type DependencyPendingDeletePayload,
+  type PendingDeleteAction,
+  type PendingDeletePayload,
+  type PlannedMode,
+  type Project,
+  type ProjectCreateInput,
+  type ProjectExport,
+  type ProjectPlan,
+  type ProjectUpdateInput,
+  type TaskPendingDeletePayload,
+  type Task,
+  type TaskCreateInput,
+  type TaskCreateResult,
+  type TaskUpdateInput,
+  type TaskWrapInput,
+  type UndoSubjectType,
+} from "@/domain/planner";
+import { computeCheckpointPercent } from "@/domain/checkpoints";
 import { computeProjectPlan } from "@/domain/scheduler";
+import { checkpoints, dependencies, pendingDeleteActions, projects, tasks } from "@/server/db/schema";
 import { CorruptedProjectError, ValidationError } from "@/server/errors";
+import { toCheckpointInsert, toDependencyInsert, toPendingDeleteActionInsert, toTaskInsert } from "@/server/repositories/mappers";
 import { projectRepository } from "@/server/repositories/project-repository";
+import { cascadeForecastFromSeeds, rebaseForecastTasks } from "@/server/services/forecast-schedule";
 import { duplicateProjectSnapshot } from "@/server/services/project-duplication";
 import { normalizeStoredTaskStatus } from "@/server/services/task-normalization";
 
+const DELETE_UNDO_WINDOW_MS = 15_000;
+let nowOverride: string | null = null;
+
 function now() {
-  return new Date().toISOString();
+  return nowOverride ?? new Date().toISOString();
 }
 
 function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
+}
+
+function expiresAt(createdAt: string) {
+  return new Date(Date.parse(createdAt) + DELETE_UNDO_WINDOW_MS).toISOString();
+}
+
+type ProjectSnapshot = NonNullable<Awaited<ReturnType<typeof projectRepository.getProjectSnapshot>>>;
+
+function areTaskForecastFieldsEqual(a: Task, b: Task) {
+  return (
+    a.plannedMode === b.plannedMode &&
+    a.plannedStart === b.plannedStart &&
+    a.plannedEnd === b.plannedEnd &&
+    a.plannedDurationDays === b.plannedDurationDays
+  );
+}
+
+function hasForecastPatch(input: TaskUpdateInput) {
+  return (
+    input.type !== undefined ||
+    input.plannedMode !== undefined ||
+    input.plannedStart !== undefined ||
+    input.plannedEnd !== undefined ||
+    input.plannedDurationDays !== undefined
+  );
+}
+
+async function persistForecastChanges(projectId: string, tasks: Task[]) {
+  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+
+  if (!snapshot) {
+    throw new ValidationError("Project not found.");
+  }
+
+  const previousById = new Map(snapshot.tasks.map((task) => [task.id, task]));
+  const updatedAt = now();
+
+  for (const task of tasks) {
+    const previous = previousById.get(task.id);
+
+    if (!previous) {
+      continue;
+    }
+
+    if (areTaskForecastFieldsEqual(previous, task)) {
+      continue;
+    }
+
+    await projectRepository.updateTask(task.id, {
+      plannedMode: task.plannedMode,
+      plannedStart: task.plannedStart,
+      plannedEnd: task.plannedEnd,
+      plannedDurationDays: task.plannedDurationDays,
+      updatedAt,
+    });
+  }
+
+  await projectRepository.updateProject(projectId, { updatedAt });
+}
+
+async function cascadeProjectForecast(projectId: string, seedTaskIds: string[], includeSeeds = false) {
+  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+
+  if (!snapshot) {
+    throw new ValidationError("Project not found.");
+  }
+
+  const nextTasks = cascadeForecastFromSeeds(snapshot, seedTaskIds, { includeSeeds });
+  await persistForecastChanges(projectId, nextTasks);
 }
 
 function exportMarkdown(plan: ProjectPlan) {
@@ -60,7 +171,7 @@ export async function listProjects() {
 }
 
 export async function getProjectPlan(projectId: string) {
-  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+  const snapshot = await projectRepository.getProjectSnapshot(projectId, now());
 
   if (!snapshot) {
     return null;
@@ -77,6 +188,7 @@ export async function createProject(input: ProjectCreateInput) {
     id: createId("project"),
     name: parsed.name,
     description: parsed.description,
+    baselineCapturedAt: null,
     createdAt,
     updatedAt: createdAt,
   };
@@ -85,7 +197,7 @@ export async function createProject(input: ProjectCreateInput) {
   return getProjectPlan(project.id);
 }
 
-export async function duplicateProject(projectId: string, name?: string) {
+export async function duplicateProject(projectId: string, name?: string, startDate?: string | null) {
   const snapshot = await projectRepository.getProjectSnapshot(projectId);
 
   if (!snapshot) {
@@ -94,18 +206,67 @@ export async function duplicateProject(projectId: string, name?: string) {
 
   assertProjectTreeIsValid(projectId, snapshot.tasks);
   const createdAt = now();
-  const duplicated = duplicateProjectSnapshot(snapshot, {
+  const duplicatedSnapshot = duplicateProjectSnapshot(snapshot, {
     projectId: createId("project"),
     now: createdAt,
     createId,
     name: name?.trim() || `${snapshot.project.name} Copy`,
   });
+  const duplicated = startDate
+    ? {
+        ...duplicatedSnapshot,
+        tasks: rebaseForecastTasks(duplicatedSnapshot.tasks, startDate),
+      }
+    : duplicatedSnapshot;
 
   await projectRepository.insertProject(duplicated.project);
   await projectRepository.insertTasks(duplicated.tasks);
   await projectRepository.insertDependencies(duplicated.dependencies);
+  await projectRepository.insertCheckpoints(duplicated.checkpoints);
 
   return getProjectPlan(duplicated.project.id);
+}
+
+export async function rebaseProjectForecast(projectId: string, startDate: string) {
+  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+
+  if (!snapshot) {
+    return null;
+  }
+
+  const nextTasks = rebaseForecastTasks(snapshot.tasks, startDate);
+  await persistForecastChanges(projectId, nextTasks);
+  return getProjectPlan(projectId);
+}
+
+export async function freezeProjectBaseline(projectId: string) {
+  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+
+  if (!snapshot) {
+    return null;
+  }
+
+  const capturedAt = now();
+
+  for (const task of snapshot.tasks) {
+    if (task.type === "summary") {
+      continue;
+    }
+
+    await projectRepository.updateTask(task.id, {
+      baselinePlannedStart: task.plannedStart,
+      baselinePlannedEnd: task.plannedEnd,
+      baselinePlannedDurationDays: task.plannedDurationDays,
+      updatedAt: capturedAt,
+    });
+  }
+
+  await projectRepository.updateProject(projectId, {
+    baselineCapturedAt: capturedAt,
+    updatedAt: capturedAt,
+  });
+
+  return getProjectPlan(projectId);
 }
 
 export async function updateProject(projectId: string, input: ProjectUpdateInput) {
@@ -122,6 +283,10 @@ function nextSortOrder(siblings: Task[]) {
   return Math.max(0, ...siblings.map((task) => task.sortOrder)) + 10;
 }
 
+function nextCheckpointSortOrder(checkpoints: Checkpoint[]) {
+  return Math.max(0, ...checkpoints.map((checkpoint) => checkpoint.sortOrder)) + 10;
+}
+
 function buildChildren(tasks: Task[]) {
   const children = new Map<string, string[]>();
 
@@ -136,6 +301,20 @@ function buildChildren(tasks: Task[]) {
   }
 
   return children;
+}
+
+function hasChildTasks(tasks: Task[], taskId: string) {
+  return tasks.some((task) => task.parentId === taskId);
+}
+
+function hasTaskCheckpoints(checkpoints: Checkpoint[], taskId: string) {
+  return checkpoints.some((checkpoint) => checkpoint.taskId === taskId);
+}
+
+function hasLinkedDependencies(taskId: string, dependencies: DependencyCreateInput[] | DependencyUpdateInput[] | { predecessorTaskId: string; successorTaskId: string }[]) {
+  return dependencies.some(
+    (dependency) => dependency.predecessorTaskId === taskId || dependency.successorTaskId === taskId,
+  );
 }
 
 function collectDescendantIds(taskId: string, tasks: Task[]) {
@@ -158,6 +337,96 @@ function collectDescendantIds(taskId: string, tasks: Task[]) {
   }
 
   return descendants;
+}
+
+function sortTasksForInsert(taskList: Task[]) {
+  const taskMap = new Map(taskList.map((task) => [task.id, task]));
+  const children = buildChildren(taskList);
+  const ordered: Task[] = [];
+
+  function visit(task: Task) {
+    ordered.push(task);
+
+    for (const childId of (children.get(task.id) ?? []).sort((leftId, rightId) => {
+      const left = taskMap.get(leftId);
+      const right = taskMap.get(rightId);
+      return (
+        (left?.sortOrder ?? 0) - (right?.sortOrder ?? 0) ||
+        (left?.name ?? leftId).localeCompare(right?.name ?? rightId)
+      );
+    })) {
+      const child = taskMap.get(childId);
+
+      if (child) {
+        visit(child);
+      }
+    }
+  }
+
+  for (const task of taskList
+    .filter((item) => item.parentId === null || !taskMap.has(item.parentId))
+    .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name))) {
+    visit(task);
+  }
+
+  return ordered;
+}
+
+function subjectTypeForTask(task: Task): UndoSubjectType {
+  if (task.type === "summary") {
+    return "section";
+  }
+
+  return task.type;
+}
+
+function buildTaskPendingDeletePayload(taskId: string, snapshot: ProjectSnapshot): TaskPendingDeletePayload {
+  const deletedIds = new Set<string>([taskId, ...collectDescendantIds(taskId, snapshot.tasks)]);
+
+  return {
+    kind: "task",
+    rootTaskId: taskId,
+    tasks: sortTasksForInsert(snapshot.tasks.filter((task) => deletedIds.has(task.id))),
+    dependencies: snapshot.dependencies.filter(
+      (dependency) => deletedIds.has(dependency.predecessorTaskId) || deletedIds.has(dependency.successorTaskId),
+    ),
+    checkpoints: snapshot.checkpoints.filter((checkpoint) => deletedIds.has(checkpoint.taskId)),
+  };
+}
+
+function buildCheckpointPendingDeletePayload(checkpoint: Checkpoint) {
+  return {
+    kind: "checkpoint" as const,
+    checkpoint,
+  };
+}
+
+function buildDependencyPendingDeletePayload(dependency: Dependency): DependencyPendingDeletePayload {
+  return {
+    kind: "dependency",
+    dependency,
+  };
+}
+
+function buildPendingDeleteAction(
+  projectId: string,
+  kind: PendingDeleteAction["kind"],
+  subjectType: UndoSubjectType,
+  subjectLabel: string,
+  payload: PendingDeletePayload,
+): PendingDeleteAction {
+  const createdAt = now();
+
+  return {
+    id: createId("undo"),
+    projectId,
+    kind,
+    subjectType,
+    subjectLabel,
+    createdAt,
+    expiresAt: expiresAt(createdAt),
+    payload,
+  };
 }
 
 function validateTaskParent(tasks: Task[], taskId: string | null, parentId: string | null) {
@@ -264,12 +533,179 @@ function assertProjectTreeIsValid(projectId: string, tasks: Task[]) {
   }
 }
 
+function requireSnapshot(snapshot: Awaited<ReturnType<typeof projectRepository.getProjectSnapshot>>) {
+  if (!snapshot) {
+    throw new ValidationError("Project not found.");
+  }
+
+  return snapshot;
+}
+
+function requireTaskInPayload(payload: TaskPendingDeletePayload, taskId: string) {
+  const task = payload.tasks.find((item) => item.id === taskId);
+
+  if (!task) {
+    throw new ValidationError("Undo payload is missing the deleted task.");
+  }
+
+  return task;
+}
+
+async function restoreTaskPendingDeleteAction(action: PendingDeleteAction) {
+  if (action.payload.kind !== "task") {
+    throw new ValidationError("Undo payload did not match the deleted task action.");
+  }
+
+  const payload = action.payload;
+  const snapshot = await projectRepository.getProjectSnapshot(action.projectId);
+
+  if (!snapshot) {
+    throw new ValidationError("Project not found.");
+  }
+
+  const deletedIds = new Set(payload.tasks.map((task) => task.id));
+  const existingTaskIds = new Set(snapshot.tasks.map((task) => task.id));
+  const rootTask = requireTaskInPayload(payload, payload.rootTaskId);
+
+  if (payload.tasks.some((task) => existingTaskIds.has(task.id))) {
+    throw new ValidationError("One or more deleted tasks already exist and cannot be restored.");
+  }
+
+  if (rootTask.parentId && !deletedIds.has(rootTask.parentId) && !existingTaskIds.has(rootTask.parentId)) {
+    throw new ValidationError("The original parent section no longer exists, so this delete cannot be undone.");
+  }
+
+  for (const dependency of payload.dependencies) {
+    if (!deletedIds.has(dependency.predecessorTaskId) && !existingTaskIds.has(dependency.predecessorTaskId)) {
+      throw new ValidationError("A linked dependency predecessor no longer exists, so this delete cannot be undone.");
+    }
+
+    if (!deletedIds.has(dependency.successorTaskId) && !existingTaskIds.has(dependency.successorTaskId)) {
+      throw new ValidationError("A linked dependency successor no longer exists, so this delete cannot be undone.");
+    }
+  }
+
+  const restoredAt = now();
+
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.insert(tasks).values(payload.tasks.map(toTaskInsert));
+
+    if (payload.checkpoints.length > 0) {
+      await tx.insert(checkpoints).values(payload.checkpoints.map(toCheckpointInsert));
+    }
+
+    if (payload.dependencies.length > 0) {
+      await tx.insert(dependencies).values(payload.dependencies.map(toDependencyInsert));
+    }
+
+    await tx.delete(pendingDeleteActions).where(eq(pendingDeleteActions.id, action.id));
+    await tx
+      .update(projects)
+      .set({ updatedAt: restoredAt })
+      .where(eq(projects.id, action.projectId));
+  });
+}
+
+async function restoreCheckpointPendingDeleteAction(action: PendingDeleteAction) {
+  if (action.payload.kind !== "checkpoint") {
+    throw new ValidationError("Undo payload did not match the deleted checkpoint action.");
+  }
+
+  const payload = action.payload;
+  const task = await projectRepository.getTask(payload.checkpoint.taskId);
+
+  if (!task || task.type !== "task") {
+    throw new ValidationError("The checkpoint task no longer exists, so this delete cannot be undone.");
+  }
+
+  const existing = await projectRepository.getCheckpoint(payload.checkpoint.id);
+
+  if (existing) {
+    throw new ValidationError("This checkpoint already exists and cannot be restored.");
+  }
+
+  const restoredAt = now();
+
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.insert(checkpoints).values(toCheckpointInsert(payload.checkpoint));
+    await tx.delete(pendingDeleteActions).where(eq(pendingDeleteActions.id, action.id));
+    await tx
+      .update(projects)
+      .set({ updatedAt: restoredAt })
+      .where(eq(projects.id, action.projectId));
+  });
+
+  await syncTaskProgressFromCheckpoints(payload.checkpoint.taskId);
+}
+
+async function restoreDependencyPendingDeleteAction(action: PendingDeleteAction) {
+  if (action.payload.kind !== "dependency") {
+    throw new ValidationError("Undo payload did not match the deleted dependency action.");
+  }
+
+  const payload = action.payload;
+  const existing = await projectRepository.getDependency(payload.dependency.id);
+
+  if (existing) {
+    throw new ValidationError("This dependency already exists and cannot be restored.");
+  }
+
+  await validateDependency(payload.dependency.projectId, payload.dependency);
+  const restoredAt = now();
+
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.insert(dependencies).values(toDependencyInsert(payload.dependency));
+    await tx.delete(pendingDeleteActions).where(eq(pendingDeleteActions.id, action.id));
+    await tx
+      .update(projects)
+      .set({ updatedAt: restoredAt })
+      .where(eq(projects.id, action.projectId));
+  });
+
+  await cascadeProjectForecast(payload.dependency.projectId, [payload.dependency.successorTaskId], true);
+}
+
+function deriveTaskProgressFromCheckpoints(task: Task, checkpoints: Checkpoint[]) {
+  const percentComplete = computeCheckpointPercent(checkpoints);
+  const status = normalizeStoredTaskStatus({
+    type: task.type,
+    status: task.status,
+    percentComplete,
+    actualStart: task.actualStart,
+    actualEnd: task.actualEnd,
+  });
+
+  return { percentComplete, status };
+}
+
+async function syncTaskProgressFromCheckpoints(taskId: string) {
+  const task = await projectRepository.getTask(taskId);
+
+  if (!task || task.type !== "task") {
+    return;
+  }
+
+  const checkpoints = await projectRepository.listCheckpointsForTask(taskId);
+
+  if (checkpoints.length === 0) {
+    return;
+  }
+
+  const { percentComplete, status } = deriveTaskProgressFromCheckpoints(task, checkpoints);
+
+  await projectRepository.updateTask(taskId, {
+    percentComplete,
+    status,
+    updatedAt: now(),
+  });
+}
+
 function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Task> {
   const merged = { ...existing, ...patch };
   const normalized: Partial<Task> = { ...patch };
 
   if (merged.type === "summary") {
-    normalized.parentId = null;
+    normalized.parentId = merged.parentId ?? null;
     normalized.plannedMode = null;
     normalized.plannedStart = null;
     normalized.plannedEnd = null;
@@ -302,7 +738,6 @@ function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Tas
     const normalizedStatus = normalizeStoredTaskStatus(normalizedTask);
     if (
       normalizedStatus !== normalizedTask.status ||
-      patch.status !== undefined ||
       patch.percentComplete !== undefined ||
       patch.actualStart !== undefined ||
       patch.actualEnd !== undefined
@@ -363,7 +798,7 @@ export async function createTask(projectId: string, input: TaskCreateInput): Pro
     return null;
   }
 
-  const normalizedParentId = parsed.type === "summary" ? null : parsed.parentId ?? null;
+  const normalizedParentId = parsed.parentId ?? null;
   validateTaskParent(snapshot.tasks, null, normalizedParentId);
   const siblings = snapshot.tasks.filter((task) => task.parentId === normalizedParentId);
   const createdAt = now();
@@ -380,6 +815,9 @@ export async function createTask(projectId: string, input: TaskCreateInput): Pro
     plannedStart: dates.plannedStart,
     plannedEnd: dates.plannedEnd,
     plannedDurationDays: dates.plannedDurationDays,
+    baselinePlannedStart: null,
+    baselinePlannedEnd: null,
+    baselinePlannedDurationDays: null,
     actualStart: null,
     actualEnd: null,
     status: "not_started",
@@ -402,26 +840,272 @@ export async function updateTask(taskId: string, input: TaskUpdateInput) {
     return null;
   }
 
-  const nextParentId = (parsed.type ?? existing.type) === "summary" ? null : (parsed.parentId ?? existing.parentId);
-  validateTaskParent(await getProjectTasks(existing.projectId), existing.id, nextParentId);
-  const normalized = normalizeTaskPatch(existing, parsed);
-  await projectRepository.updateTask(taskId, { ...normalized, updatedAt: now() });
-  return getProjectPlan(existing.projectId);
-}
-
-export async function deleteTask(taskId: string) {
-  const projectId = await projectRepository.deleteTask(taskId);
-  return projectId ? getProjectPlan(projectId) : null;
-}
-
-async function getProjectTasks(projectId: string) {
-  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+  const snapshot = await projectRepository.getProjectSnapshot(existing.projectId);
 
   if (!snapshot) {
     throw new ValidationError("Project not found.");
   }
 
-  return snapshot.tasks;
+  const nextType = parsed.type ?? existing.type;
+  const nextParentId = parsed.parentId ?? existing.parentId;
+  const taskHasCheckpoints = hasTaskCheckpoints(snapshot.checkpoints, existing.id);
+
+  if (existing.type === "summary" && nextType !== "summary" && hasChildTasks(snapshot.tasks, existing.id)) {
+    throw new ValidationError("Summary sections with children cannot be converted to leaf tasks.");
+  }
+
+  if (taskHasCheckpoints && nextType !== "task") {
+    throw new ValidationError("Tasks with checkpoints must remain tasks until their checkpoints are removed.");
+  }
+
+  if (existing.type !== "summary" && nextType === "summary" && hasLinkedDependencies(existing.id, snapshot.dependencies)) {
+    throw new ValidationError("Tasks with dependencies cannot be converted directly to sections. Wrap the task in a section instead.");
+  }
+
+  if (taskHasCheckpoints && parsed.percentComplete !== undefined) {
+    throw new ValidationError("Tasks with checkpoints derive percent complete from their checkpoints.");
+  }
+
+  validateTaskParent(snapshot.tasks, existing.id, nextParentId);
+  const normalized = normalizeTaskPatch(existing, parsed);
+  await projectRepository.updateTask(taskId, { ...normalized, updatedAt: now() });
+  const nextTask = { ...existing, ...normalized };
+
+  if (nextTask.type !== "summary" && hasForecastPatch(parsed)) {
+    await cascadeProjectForecast(existing.projectId, [taskId]);
+  }
+
+  return getProjectPlan(existing.projectId);
+}
+
+export async function deleteTask(taskId: string) {
+  const task = await projectRepository.getTask(taskId);
+
+  if (!task) {
+    return null;
+  }
+
+  await projectRepository.purgeExpiredPendingDeleteActions(task.projectId, now());
+  const snapshot = requireSnapshot(await projectRepository.getProjectSnapshot(task.projectId));
+  const payload = buildTaskPendingDeletePayload(taskId, snapshot);
+  const action = buildPendingDeleteAction(
+    task.projectId,
+    "task",
+    subjectTypeForTask(task),
+    task.name,
+    payload,
+  );
+  const deletedIds = payload.tasks.map((item) => item.id);
+  const deletedAt = now();
+
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.insert(pendingDeleteActions).values(toPendingDeleteActionInsert(action));
+    await tx
+      .delete(dependencies)
+      .where(
+        and(
+          eq(dependencies.projectId, task.projectId),
+          or(
+            inArray(dependencies.predecessorTaskId, deletedIds),
+            inArray(dependencies.successorTaskId, deletedIds),
+          ),
+        ),
+      );
+    await tx.delete(tasks).where(inArray(tasks.id, deletedIds));
+    await tx
+      .update(projects)
+      .set({ updatedAt: deletedAt })
+      .where(eq(projects.id, task.projectId));
+  });
+
+  return getProjectPlan(task.projectId);
+}
+
+export async function wrapTaskInSection(taskId: string, input: TaskWrapInput = {}) {
+  const parsed = taskWrapSchema.parse(input);
+  const existing = await projectRepository.getTask(taskId);
+
+  if (!existing) {
+    return null;
+  }
+
+  if (existing.type === "summary") {
+    throw new ValidationError("Only leaf tasks can be wrapped in a section.");
+  }
+
+  const snapshot = await projectRepository.getProjectSnapshot(existing.projectId);
+
+  if (!snapshot) {
+    throw new ValidationError("Project not found.");
+  }
+
+  const createdAt = now();
+  const childName = parsed.childName?.trim() || "Execution";
+  const section: Task = {
+    id: createId("task"),
+    projectId: existing.projectId,
+    parentId: existing.parentId,
+    name: existing.name,
+    notes: "",
+    sortOrder: existing.sortOrder,
+    type: "summary",
+    plannedMode: null,
+    plannedStart: null,
+    plannedEnd: null,
+    plannedDurationDays: null,
+    baselinePlannedStart: null,
+    baselinePlannedEnd: null,
+    baselinePlannedDurationDays: null,
+    actualStart: null,
+    actualEnd: null,
+    status: "not_started",
+    percentComplete: 0,
+    isExpanded: true,
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  await projectRepository.createTask(section);
+  await projectRepository.updateTask(existing.id, {
+    parentId: section.id,
+    name: childName,
+    sortOrder: 10,
+    updatedAt: createdAt,
+  });
+
+  return getProjectPlan(existing.projectId);
+}
+
+export async function createCheckpoint(taskId: string, input: CheckpointCreateInput) {
+  const parsed = checkpointCreateSchema.parse(input);
+  const task = await projectRepository.getTask(taskId);
+
+  if (!task) {
+    return null;
+  }
+
+  if (task.type !== "task") {
+    throw new ValidationError("Checkpoints can only be added to tasks.");
+  }
+
+  const existingCheckpoints = await projectRepository.listCheckpointsForTask(taskId);
+  const createdAt = now();
+
+  await projectRepository.createCheckpoint({
+    id: createId("checkpoint"),
+    taskId,
+    name: parsed.name,
+    percentComplete: parsed.percentComplete,
+    weightPoints: parsed.weightPoints,
+    sortOrder: nextCheckpointSortOrder(existingCheckpoints),
+    createdAt,
+    updatedAt: createdAt,
+  });
+
+  await syncTaskProgressFromCheckpoints(taskId);
+  return getProjectPlan(task.projectId);
+}
+
+export async function updateCheckpoint(checkpointId: string, input: CheckpointUpdateInput) {
+  const parsed = checkpointUpdateSchema.parse(input);
+  const checkpoint = await projectRepository.getCheckpoint(checkpointId);
+
+  if (!checkpoint) {
+    return null;
+  }
+
+  const task = await projectRepository.getTask(checkpoint.taskId);
+
+  if (!task) {
+    throw new ValidationError("Checkpoint task was not found.");
+  }
+
+  if (task.type !== "task") {
+    throw new ValidationError("Checkpoints can only belong to tasks.");
+  }
+
+  await projectRepository.updateCheckpoint(checkpointId, { ...parsed, updatedAt: now() });
+  await syncTaskProgressFromCheckpoints(checkpoint.taskId);
+  return getProjectPlan(task.projectId);
+}
+
+export async function deleteCheckpoint(checkpointId: string) {
+  const checkpoint = await projectRepository.getCheckpoint(checkpointId);
+
+  if (!checkpoint) {
+    return null;
+  }
+
+  const task = await projectRepository.getTask(checkpoint.taskId);
+
+  if (!task) {
+    throw new ValidationError("Checkpoint task was not found.");
+  }
+
+  await projectRepository.purgeExpiredPendingDeleteActions(task.projectId, now());
+  const taskId = checkpoint.taskId;
+  const deletedAt = now();
+  const action = buildPendingDeleteAction(
+    task.projectId,
+    "checkpoint",
+    "checkpoint",
+    checkpoint.name,
+    buildCheckpointPendingDeletePayload(checkpoint),
+  );
+
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.insert(pendingDeleteActions).values(toPendingDeleteActionInsert(action));
+    await tx.delete(checkpoints).where(eq(checkpoints.id, checkpointId));
+    await tx
+      .update(projects)
+      .set({ updatedAt: deletedAt })
+      .where(eq(projects.id, task.projectId));
+  });
+
+  await syncTaskProgressFromCheckpoints(taskId);
+  return getProjectPlan(task.projectId);
+}
+
+export async function moveCheckpoint(checkpointId: string, input: CheckpointMoveInput) {
+  const parsed = checkpointMoveSchema.parse(input);
+  const checkpoint = await projectRepository.getCheckpoint(checkpointId);
+
+  if (!checkpoint) {
+    return null;
+  }
+
+  const task = await projectRepository.getTask(checkpoint.taskId);
+
+  if (!task) {
+    throw new ValidationError("Checkpoint task was not found.");
+  }
+
+  const checkpoints = await projectRepository.listCheckpointsForTask(checkpoint.taskId);
+  const currentIndex = checkpoints.findIndex((item) => item.id === checkpointId);
+
+  if (currentIndex === -1) {
+    return getProjectPlan(task.projectId);
+  }
+
+  const swapIndex = parsed.direction === "up" ? currentIndex - 1 : currentIndex + 1;
+
+  if (swapIndex < 0 || swapIndex >= checkpoints.length) {
+    return getProjectPlan(task.projectId);
+  }
+
+  const neighbor = checkpoints[swapIndex];
+  const updatedAt = now();
+
+  await projectRepository.updateCheckpoint(checkpointId, {
+    sortOrder: neighbor.sortOrder,
+    updatedAt,
+  });
+  await projectRepository.updateCheckpoint(neighbor.id, {
+    sortOrder: checkpoint.sortOrder,
+    updatedAt,
+  });
+
+  return getProjectPlan(task.projectId);
 }
 
 async function validateDependency(projectId: string, input: DependencyCreateInput | DependencyUpdateInput) {
@@ -463,6 +1147,7 @@ export async function createDependency(projectId: string, input: DependencyCreat
     updatedAt: createdAt,
   });
 
+  await cascadeProjectForecast(projectId, [parsed.successorTaskId], true);
   return getProjectPlan(projectId);
 }
 
@@ -477,12 +1162,66 @@ export async function updateDependency(dependencyId: string, input: DependencyUp
   const merged = { ...dependency, ...parsed };
   await validateDependency(dependency.projectId, merged);
   await projectRepository.updateDependency(dependencyId, { ...parsed, updatedAt: now() });
+  await cascadeProjectForecast(dependency.projectId, [merged.successorTaskId], true);
   return getProjectPlan(dependency.projectId);
 }
 
 export async function deleteDependency(dependencyId: string) {
-  const projectId = await projectRepository.deleteDependency(dependencyId);
-  return projectId ? getProjectPlan(projectId) : null;
+  const dependency = await projectRepository.getDependency(dependencyId);
+  const deletedAt = now();
+
+  if (dependency) {
+    await projectRepository.purgeExpiredPendingDeleteActions(dependency.projectId, deletedAt);
+    const action = buildPendingDeleteAction(
+      dependency.projectId,
+      "dependency",
+      "dependency",
+      `${dependency.predecessorTaskId} -> ${dependency.successorTaskId}`,
+      buildDependencyPendingDeletePayload(dependency),
+    );
+
+    await projectRepository.withTransaction(async (tx) => {
+      await tx.insert(pendingDeleteActions).values(toPendingDeleteActionInsert(action));
+      await tx.delete(dependencies).where(eq(dependencies.id, dependencyId));
+      await tx
+        .update(projects)
+        .set({ updatedAt: deletedAt })
+        .where(eq(projects.id, dependency.projectId));
+    });
+  }
+
+  if (dependency) {
+    await cascadeProjectForecast(dependency.projectId, [dependency.successorTaskId], true);
+  }
+
+  return dependency ? getProjectPlan(dependency.projectId) : null;
+}
+
+export async function undoPendingDeleteAction(actionId: string) {
+  const action = await projectRepository.getPendingDeleteAction(actionId);
+
+  if (!action) {
+    return null;
+  }
+
+  if (action.expiresAt <= now()) {
+    await projectRepository.deletePendingDeleteAction(actionId);
+    throw new ValidationError("This undo action has expired.");
+  }
+
+  switch (action.kind) {
+    case "task":
+      await restoreTaskPendingDeleteAction(action);
+      break;
+    case "checkpoint":
+      await restoreCheckpointPendingDeleteAction(action);
+      break;
+    case "dependency":
+      await restoreDependencyPendingDeleteAction(action);
+      break;
+  }
+
+  return getProjectPlan(action.projectId);
 }
 
 export async function exportProject(projectId: string): Promise<ProjectExport | null> {
@@ -510,6 +1249,10 @@ export async function exportProject(projectId: string): Promise<ProjectExport | 
 export const __testUtils = {
   buildTaskDates,
   collectProjectTreeIssues,
+  hasChildTasks,
   normalizeTaskPatch,
+  setNowOverride(value: string | null) {
+    nowOverride = value;
+  },
   validateTaskParent,
 };

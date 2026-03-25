@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import {
   ArrowsInLineHorizontal,
   ArrowsOutLineVertical,
   CaretDown,
   CaretRight,
+  Check,
   DownloadSimple,
-  FunnelSimple,
   GitBranch,
   MagnifyingGlass,
   Minus,
@@ -18,7 +18,7 @@ import {
 } from "@phosphor-icons/react";
 import { format, parseISO } from "date-fns";
 
-import type { PlannedTask, Project, ProjectPlan, TaskStatus, TaskType } from "@/domain/planner";
+import type { Checkpoint, PlannedTask, Project, ProjectPlan, TaskType } from "@/domain/planner";
 import { shiftBusinessDays } from "@/domain/date-utils";
 import { DatePickerField } from "@/features/planner/components/date-picker-field";
 import { ProjectRenameDialog } from "@/features/planner/components/project-rename-dialog";
@@ -33,6 +33,15 @@ import {
   ContextMenuRoot,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogRoot,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
@@ -50,12 +59,6 @@ import {
   NavigationMenuTrigger,
 } from "@/components/ui/navigation-menu";
 import { PopoverContent, PopoverRoot, PopoverTrigger } from "@/components/ui/popover";
-import {
-  SelectContent,
-  SelectItem,
-  SelectRoot,
-  SelectTrigger,
-} from "@/components/ui/select";
 import { SliderRange, SliderRoot, SliderThumb, SliderTrack } from "@/components/ui/slider";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipContent, TooltipProvider, TooltipRoot, TooltipTrigger } from "@/components/ui/tooltip";
@@ -67,14 +70,21 @@ type Props = {
 };
 
 type ViewMode = "list" | "gantt";
-type StatusFilter = "all" | "open" | "blocked" | "done";
-type EditableField = "status" | "progress" | "start" | "due" | "dependencies";
+type StatusFilter = "all" | "open" | "done";
+type EditableField = "progress" | "start" | "due" | "dependencies";
+type CheckpointEditableField = "name" | "progress" | "weight";
 
 const LIST_GRID_CLASS = "grid-cols-[minmax(240px,1.7fr)_140px_170px_120px_120px_minmax(160px,1fr)_56px]";
 const GANTT_NAME_COLUMN_WIDTH = 320;
 const GANTT_DEFAULT_COLUMN_WIDTH = 48;
 const GANTT_MAX_COLUMN_WIDTH = 96;
 const GANTT_ZOOM_STEP = 12;
+
+type CheckpointDraft = {
+  name: string;
+  percentComplete: string;
+  weightPoints: string;
+};
 
 type DialogState =
   | {
@@ -96,19 +106,10 @@ type DialogState =
       allowedCreateTypes: TaskType[];
     };
 
-const statusOptions: Array<{ value: TaskStatus; label: string }> = [
-  { value: "not_started", label: "Not started" },
-  { value: "in_progress", label: "In progress" },
-  { value: "blocked", label: "Blocked" },
-  { value: "done", label: "Done" },
-];
-
 function statusVariant(status: PlannedTask["rolledUpStatus"]) {
   switch (status) {
     case "done":
       return "success" as const;
-    case "blocked":
-      return "destructive" as const;
     case "in_progress":
       return "warning" as const;
     default:
@@ -176,20 +177,79 @@ function shouldShowTimelineWeekday(columnWidth: number) {
 }
 
 function taskBarStyle(task: PlannedTask, timeline: string[]) {
-  if (!task.computedPlannedStart || !task.computedPlannedEnd || timeline.length === 0) {
+  return barStyleForRange(task.computedPlannedStart, task.computedPlannedEnd, timeline);
+}
+
+function barStyleForRange(start: string | null, end: string | null, timeline: string[]) {
+  if (!start || !end || timeline.length === 0) {
     return { left: "0%", width: "0%" };
   }
 
-  const startIndex = Math.max(0, timeline.indexOf(task.computedPlannedStart));
-  const endIndex = Math.max(startIndex, timeline.indexOf(task.computedPlannedEnd));
+  const startIndex = Math.max(0, timeline.indexOf(start));
+  const endIndex = Math.max(startIndex, timeline.indexOf(end));
   const left = (startIndex / Math.max(timeline.length, 1)) * 100;
   const width = ((endIndex - startIndex + 1) / Math.max(timeline.length, 1)) * 100;
 
   return { left: `${left}%`, width: `${Math.max(width, 4)}%` };
 }
 
+function signedBusinessDayGap(from: string, to: string) {
+  if (from === to) {
+    return 0;
+  }
+
+  if (to > from) {
+    let cursor = from;
+    let offset = 0;
+
+    while (cursor < to) {
+      cursor = shiftBusinessDays(cursor, 1);
+      offset += 1;
+    }
+
+    return offset;
+  }
+
+  let cursor = from;
+  let offset = 0;
+
+  while (cursor > to) {
+    cursor = shiftBusinessDays(cursor, -1);
+    offset -= 1;
+  }
+
+  return offset;
+}
+
 function progressPercent(task: PlannedTask) {
   return task.isSummary ? task.rolledUpPercentComplete : task.percentComplete;
+}
+
+function plannerDisplayStart(task: PlannedTask) {
+  return task.computedPlannedStart ?? task.plannedStart;
+}
+
+function plannerDisplayEnd(task: PlannedTask) {
+  return task.computedPlannedEnd ?? task.plannedEnd;
+}
+
+function sortPlannerTasks(a: PlannedTask, b: PlannedTask) {
+  const startA = plannerDisplayStart(a);
+  const startB = plannerDisplayStart(b);
+
+  if (startA && startB && startA !== startB) {
+    return startA.localeCompare(startB);
+  }
+
+  if (startA && !startB) {
+    return -1;
+  }
+
+  if (!startA && startB) {
+    return 1;
+  }
+
+  return a.sortOrder - b.sortOrder || a.name.localeCompare(b.name);
 }
 
 function ProgressPill({ value, compact = false }: { value: number; compact?: boolean }) {
@@ -206,6 +266,35 @@ function ProgressPill({ value, compact = false }: { value: number; compact?: boo
   );
 }
 
+function CheckpointProgressPill({ value }: { value: number }) {
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-chart-1 transition-[width]"
+          style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
+        />
+      </div>
+      <p className="text-[11px] text-muted-foreground">{value}%</p>
+    </div>
+  );
+}
+
+function pendingUndoTitle(action: ProjectPlan["pendingUndoActions"][number]) {
+  switch (action.subjectType) {
+    case "section":
+      return "Section deleted";
+    case "milestone":
+      return "Milestone deleted";
+    case "checkpoint":
+      return "Checkpoint deleted";
+    case "dependency":
+      return "Dependency removed";
+    default:
+      return "Task deleted";
+  }
+}
+
 export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [plan, setPlan] = useState(initialPlan);
   const [projects, setProjects] = useState(initialProjects);
@@ -213,8 +302,12 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
+  const [rebaseOpen, setRebaseOpen] = useState(false);
+  const [rebaseStartDate, setRebaseStartDate] = useState<string | null>(null);
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(initialPlan.tasks.map((task) => [task.id, task.hasChildren ? false : task.isExpanded])),
+    Object.fromEntries(
+      initialPlan.tasks.map((task) => [task.id, task.hasChildren || task.checkpoints.length > 0 ? false : task.isExpanded]),
+    ),
   );
   const [dialogState, setDialogState] = useState<DialogState>({
     open: false,
@@ -226,22 +319,38 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     allowedCreateTypes: ["task", "summary", "milestone"],
   });
   const [activeCell, setActiveCell] = useState<{ taskId: string; field: EditableField } | null>(null);
+  const [activeCheckpointCell, setActiveCheckpointCell] = useState<{
+    checkpointId: string;
+    field: CheckpointEditableField;
+  } | null>(null);
   const [progressDrafts, setProgressDrafts] = useState<Record<string, string>>({});
+  const [checkpointDrafts, setCheckpointDrafts] = useState<Record<string, CheckpointDraft>>({});
   const [pendingTaskIds, setPendingTaskIds] = useState<Record<string, boolean>>({});
+  const [pendingCheckpointIds, setPendingCheckpointIds] = useState<Record<string, boolean>>({});
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
   const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
   const [isPending, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
+  const undoToastIdsRef = useRef<Set<string>>(new Set());
 
   const taskMap = useMemo(() => new Map(plan.tasks.map((task) => [task.id, task])), [plan.tasks]);
   const rootTasks = useMemo(
     () =>
       plan.tasks
         .filter((task) => task.parentId === null)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+        .sort(sortPlannerTasks),
     [plan.tasks],
   );
   const leafTasks = useMemo(() => plan.tasks.filter((task) => !task.isSummary), [plan.tasks]);
+  const earliestForecastStart = useMemo(
+    () =>
+      leafTasks
+        .map((task) => plannerDisplayStart(task))
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(0) ?? null,
+    [leafTasks],
+  );
   const timeline = useMemo(() => buildTimeline(plan.timelineStart, plan.timelineEnd), [plan.timelineEnd, plan.timelineStart]);
   const monthSegments = useMemo(() => buildMonthSegments(timeline), [timeline]);
   const ganttTimelineViewportWidth = Math.max(ganttViewportWidth - GANTT_NAME_COLUMN_WIDTH, 0);
@@ -258,13 +367,51 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
       for (const task of plan.tasks) {
         if (!(task.id in next)) {
-          next[task.id] = task.hasChildren ? false : task.isExpanded;
+          next[task.id] = task.hasChildren || task.checkpoints.length > 0 ? false : task.isExpanded;
         }
       }
 
       return next;
     });
   }, [plan.tasks]);
+
+  useEffect(() => {
+    setRebaseStartDate(earliestForecastStart);
+  }, [earliestForecastStart, plan.project.id]);
+
+  useEffect(() => {
+    const nextToastIds = new Set<string>();
+
+    for (const action of plan.pendingUndoActions) {
+      const toastId = `undo-${action.id}`;
+      const remainingMs = Date.parse(action.expiresAt) - Date.now();
+
+      if (remainingMs <= 0) {
+        continue;
+      }
+
+      nextToastIds.add(toastId);
+      toast.success(pendingUndoTitle(action), {
+        id: toastId,
+        duration: remainingMs,
+        description: action.subjectType === "dependency" ? undefined : action.subjectLabel,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            void undoPendingDelete(action.id);
+          },
+        },
+      });
+    }
+
+    for (const toastId of undoToastIdsRef.current) {
+      if (!nextToastIds.has(toastId)) {
+        toast.dismiss(toastId);
+      }
+    }
+
+    undoToastIdsRef.current = nextToastIds;
+  }, [plan.pendingUndoActions]);
 
   useEffect(() => {
     const viewport = ganttViewportRef.current;
@@ -308,6 +455,48 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     });
   }
 
+  function markCheckpointPending(checkpointId: string, pending: boolean) {
+    setPendingCheckpointIds((current) => {
+      const next = { ...current };
+
+      if (pending) {
+        next[checkpointId] = true;
+      } else {
+        delete next[checkpointId];
+      }
+
+      return next;
+    });
+  }
+
+  function checkpointDraft(checkpoint: Checkpoint) {
+    const draft = checkpointDrafts[checkpoint.id];
+
+    return {
+      name: draft?.name ?? checkpoint.name,
+      percentComplete: draft?.percentComplete ?? String(checkpoint.percentComplete),
+      weightPoints: draft?.weightPoints ?? String(checkpoint.weightPoints),
+    };
+  }
+
+  function setCheckpointDraft(checkpointId: string, patch: Partial<CheckpointDraft>) {
+    setCheckpointDrafts((current) => ({
+      ...current,
+      [checkpointId]: {
+        ...current[checkpointId],
+        ...patch,
+      },
+    }));
+  }
+
+  function clearCheckpointDraft(checkpointId: string) {
+    setCheckpointDrafts((current) => {
+      const next = { ...current };
+      delete next[checkpointId];
+      return next;
+    });
+  }
+
   function applyPlan(nextPlan: ProjectPlan) {
     setPlan(nextPlan);
     setProjects((current) => {
@@ -340,6 +529,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
     return payload as ProjectPlan;
   }
+
+  const undoPendingDelete = useEffectEvent(async (actionId: string) => {
+    try {
+      const nextPlan = await requestPlan(`/api/undo/${actionId}`, {
+        method: "POST",
+      });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        toast.success("Delete undone");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to undo delete.");
+    }
+  });
 
   async function toggleTask(taskId: string) {
     const nextExpanded = !expandedMap[taskId];
@@ -386,11 +590,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     const matchesSearch =
       query.length === 0 ||
       task.name.toLowerCase().includes(query) ||
-      task.notes.toLowerCase().includes(query);
+      task.notes.toLowerCase().includes(query) ||
+      task.checkpoints.some((checkpoint) => checkpoint.name.toLowerCase().includes(query));
     const matchesStatus =
       statusFilter === "all" ||
       (statusFilter === "open" && task.rolledUpStatus !== "done") ||
-      (statusFilter === "blocked" && task.rolledUpStatus === "blocked") ||
       (statusFilter === "done" && task.rolledUpStatus === "done");
 
     return matchesSearch && matchesStatus;
@@ -447,6 +651,18 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     );
   }
 
+  function isCheckpointCellActive(checkpointId: string, field: CheckpointEditableField) {
+    return activeCheckpointCell?.checkpointId === checkpointId && activeCheckpointCell.field === field;
+  }
+
+  function checkpointCellButtonClass(checkpointId: string, field: CheckpointEditableField) {
+    return cn(
+      "group w-full cursor-pointer rounded-2xl px-2 py-2 text-left transition",
+      "hover:bg-muted/45 hover:ring-1 hover:ring-border/70",
+      isCheckpointCellActive(checkpointId, field) && "bg-muted/55 ring-1 ring-border/70",
+    );
+  }
+
   async function patchTask(task: PlannedTask, patch: Record<string, unknown>, successMessage?: string) {
     markTaskPending(task.id, true);
 
@@ -471,20 +687,217 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     }
   }
 
+  async function createCheckpointForTask(task: PlannedTask) {
+    markTaskPending(task.id, true);
+
+    try {
+      const nextPlan = await requestPlan(`/api/tasks/${task.id}/checkpoints`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "New checkpoint",
+          percentComplete: 0,
+          weightPoints: 1,
+        }),
+      });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        setExpandedMap((current) => ({ ...current, [task.id]: true }));
+        toast.success("Checkpoint added");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to add checkpoint.");
+    } finally {
+      markTaskPending(task.id, false);
+    }
+  }
+
+  async function saveCheckpoint(taskId: string, checkpoint: Checkpoint) {
+    const draft = checkpointDraft(checkpoint);
+    markCheckpointPending(checkpoint.id, true);
+
+    try {
+      const nextPlan = await requestPlan(`/api/checkpoints/${checkpoint.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: draft.name.trim(),
+          percentComplete: Number(draft.percentComplete),
+          weightPoints: Number(draft.weightPoints),
+        }),
+      });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        clearCheckpointDraft(checkpoint.id);
+        setExpandedMap((current) => ({ ...current, [taskId]: true }));
+        toast.success("Checkpoint updated");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update checkpoint.");
+    } finally {
+      markCheckpointPending(checkpoint.id, false);
+    }
+  }
+
+  async function moveCheckpointRow(taskId: string, checkpointId: string, direction: "up" | "down") {
+    markCheckpointPending(checkpointId, true);
+
+    try {
+      const nextPlan = await requestPlan(`/api/checkpoints/${checkpointId}/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ direction }),
+      });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        setExpandedMap((current) => ({ ...current, [taskId]: true }));
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to reorder checkpoint.");
+    } finally {
+      markCheckpointPending(checkpointId, false);
+    }
+  }
+
+  async function removeCheckpointRow(taskId: string, checkpointId: string) {
+    markCheckpointPending(checkpointId, true);
+
+    try {
+      const nextPlan = await requestPlan(`/api/checkpoints/${checkpointId}`, {
+        method: "DELETE",
+      });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        clearCheckpointDraft(checkpointId);
+        setExpandedMap((current) => ({ ...current, [taskId]: true }));
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to remove checkpoint.");
+    } finally {
+      markCheckpointPending(checkpointId, false);
+    }
+  }
+
+  async function wrapTask(task: PlannedTask) {
+    markTaskPending(task.id, true);
+
+    try {
+      const nextPlan = await requestPlan(`/api/tasks/${task.id}/wrap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ childName: "Execution" }),
+      });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        toast.success("Task wrapped in a section");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to wrap task.");
+    } finally {
+      markTaskPending(task.id, false);
+    }
+  }
+
+  async function freezeBaseline() {
+    startTransition(async () => {
+      try {
+        const nextPlan = await requestPlan(`/api/projects/${plan.project.id}/freeze-baseline`, {
+          method: "POST",
+        });
+
+        if (nextPlan) {
+          applyPlan(nextPlan);
+          toast.success(plan.project.baselineCapturedAt ? "Baseline reset" : "Baseline frozen");
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to freeze baseline.");
+      }
+    });
+  }
+
+  async function rebaseSchedule() {
+    if (!rebaseStartDate) {
+      toast.error("Choose a new project start date.");
+      return;
+    }
+
+    startTransition(async () => {
+      try {
+        const nextPlan = await requestPlan(`/api/projects/${plan.project.id}/rebase`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startDate: rebaseStartDate }),
+        });
+
+        if (nextPlan) {
+          applyPlan(nextPlan);
+          setRebaseOpen(false);
+          toast.success("Project schedule rebased");
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to rebase project schedule.");
+      }
+    });
+  }
+
   function buildSchedulePatch(task: PlannedTask, patch: { plannedStart?: string | null; plannedEnd?: string | null }) {
     if (patch.plannedEnd !== undefined || task.plannedMode === "start_end") {
       return {
         plannedMode: "start_end",
-        plannedStart: patch.plannedStart ?? task.plannedStart ?? task.computedPlannedStart,
-        plannedEnd: patch.plannedEnd ?? task.plannedEnd ?? task.computedPlannedEnd,
+        plannedStart: patch.plannedStart ?? plannerDisplayStart(task),
+        plannedEnd: patch.plannedEnd ?? plannerDisplayEnd(task),
       };
     }
 
     return {
       plannedMode: "start_duration",
-      plannedStart: patch.plannedStart ?? task.plannedStart ?? task.computedPlannedStart,
+      plannedStart: patch.plannedStart ?? plannerDisplayStart(task),
       plannedDurationDays: task.plannedDurationDays ?? task.computedPlannedDurationDays ?? (task.type === "milestone" ? 0 : 1),
     };
+  }
+
+  function forecastVarianceLabel(task: PlannedTask) {
+    if (!task.computedBaselinePlannedEnd || !task.computedPlannedEnd) {
+      return null;
+    }
+
+    const delta = signedBusinessDayGap(task.computedBaselinePlannedEnd, task.computedPlannedEnd);
+
+    if (delta === 0) {
+      return "On baseline";
+    }
+
+    return delta > 0 ? `+${delta}d late` : `${Math.abs(delta)}d early`;
+  }
+
+  function taskComparisonItems(task: PlannedTask) {
+    const items: string[] = [];
+
+    if (task.computedBaselinePlannedStart || task.computedBaselinePlannedEnd) {
+      items.push(
+        `Baseline: ${formatShortDate(task.computedBaselinePlannedStart)} → ${formatShortDate(task.computedBaselinePlannedEnd)}`,
+      );
+    }
+
+    if (task.actualStart || task.computedActualStart) {
+      items.push(`Actual start: ${formatShortDate(task.actualStart ?? task.computedActualStart)}`);
+    }
+
+    if (task.actualEnd || task.computedActualEnd) {
+      items.push(`Actual end: ${formatShortDate(task.actualEnd ?? task.computedActualEnd)}`);
+    }
+
+    const variance = forecastVarianceLabel(task);
+    if (variance) {
+      items.push(variance);
+    }
+
+    return items;
   }
 
   async function removeTask(taskId: string) {
@@ -492,10 +905,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       try {
         const nextPlan = await requestPlan(`/api/tasks/${taskId}`, { method: "DELETE" });
 
-        if (nextPlan) {
-          applyPlan(nextPlan);
-          toast.success("Task removed");
-        }
+      if (nextPlan) {
+        applyPlan(nextPlan);
+      }
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Failed to remove task.");
       }
@@ -587,7 +999,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   function renderLeafControls(task: PlannedTask) {
     const currentProgress = Number(progressDrafts[task.id] ?? task.percentComplete);
     const isPending = Boolean(pendingTaskIds[task.id]);
-    const statusActive = isCellActive(task.id, "status");
+    const progressChanged = currentProgress !== task.percentComplete;
     const progressActive = isCellActive(task.id, "progress");
     const startActive = isCellActive(task.id, "start");
     const dueActive = isCellActive(task.id, "due");
@@ -595,92 +1007,88 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
     return (
       <>
-        <div onClick={(event) => event.stopPropagation()}>
-          <SelectRoot
-            open={statusActive}
-            value={task.rolledUpStatus}
-            onOpenChange={(open) => setActiveCell(open ? { taskId: task.id, field: "status" } : null)}
-            onValueChange={(value) => {
-              setActiveCell(null);
-              void patchTask(task, { status: value });
-            }}
-            disabled={isPending}
-          >
-            <SelectTrigger className={cn(cellButtonClass(task.id, "status"), "h-auto justify-between border-0 bg-transparent shadow-none")}>
-              <Badge variant={statusVariant(task.rolledUpStatus)}>{statusLabel(task.rolledUpStatus)}</Badge>
-            </SelectTrigger>
-            <SelectContent align="start">
-              {statusOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </SelectRoot>
+        <div>
+          <button className={cn(cellButtonClass(task.id, "progress"), "cursor-default")} disabled>
+            <Badge variant={statusVariant(task.rolledUpStatus)}>{statusLabel(task.rolledUpStatus)}</Badge>
+          </button>
         </div>
 
         <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
-          <PopoverRoot
-            open={progressActive}
-            onOpenChange={(open) => {
-              if (open) {
-                setProgressDrafts((current) => ({ ...current, [task.id]: String(task.percentComplete) }));
-                setActiveCell({ taskId: task.id, field: "progress" });
-                return;
-              }
+          {task.isProgressDerived ? (
+            <button className={cn(cellButtonClass(task.id, "progress"), "cursor-default")} disabled>
+              <ProgressPill value={task.percentComplete} compact />
+            </button>
+          ) : (
+            <PopoverRoot
+              open={progressActive}
+              onOpenChange={(open) => {
+                if (open) {
+                  setProgressDrafts((current) => ({ ...current, [task.id]: String(task.percentComplete) }));
+                  setActiveCell({ taskId: task.id, field: "progress" });
+                  return;
+                }
 
-              setActiveCell((current) => (current?.taskId === task.id && current.field === "progress" ? null : current));
-              setProgressDrafts((current) => {
-                const next = { ...current };
-                delete next[task.id];
-                return next;
-              });
-            }}
-          >
-            <PopoverTrigger asChild>
-              <button className={cellButtonClass(task.id, "progress")} disabled={isPending}>
-                <ProgressPill value={task.percentComplete} compact />
-              </button>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-72 rounded-2xl p-4" onOpenAutoFocus={(event) => event.preventDefault()}>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Progress</span>
-                  <span className="text-sm font-medium">{currentProgress}%</span>
+                setActiveCell((current) => (current?.taskId === task.id && current.field === "progress" ? null : current));
+                setProgressDrafts((current) => {
+                  const next = { ...current };
+                  delete next[task.id];
+                  return next;
+                });
+              }}
+            >
+              <PopoverTrigger asChild>
+                <button className={cellButtonClass(task.id, "progress")} disabled={isPending}>
+                  <ProgressPill value={task.percentComplete} compact />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-72 rounded-2xl p-4" onOpenAutoFocus={(event) => event.preventDefault()}>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Progress</span>
+                    <span className="text-sm font-medium">{currentProgress}%</span>
+                  </div>
+                  <SliderRoot
+                    value={[currentProgress]}
+                    min={0}
+                    max={100}
+                    step={5}
+                    onValueChange={(value) => setProgressDrafts((current) => ({ ...current, [task.id]: String(value[0] ?? 0) }))}
+                    disabled={isPending}
+                  >
+                    <SliderTrack>
+                      <SliderRange />
+                    </SliderTrack>
+                    <SliderThumb />
+                  </SliderRoot>
+                  <div className="flex justify-end">
+                    <Button
+                      size="icon-xs"
+                      onClick={() => {
+                        const nextValue = Number(progressDrafts[task.id] ?? task.percentComplete);
+                        setActiveCell(null);
+                        setProgressDrafts((current) => {
+                          const next = { ...current };
+                          delete next[task.id];
+                          return next;
+                        });
+                        void patchTask(task, { percentComplete: nextValue });
+                      }}
+                      disabled={isPending || !progressChanged}
+                    >
+                      <Check className="size-3.5" />
+                      <span className="sr-only">Save progress</span>
+                    </Button>
+                  </div>
                 </div>
-                <SliderRoot
-                  value={[currentProgress]}
-                  min={0}
-                  max={100}
-                  step={5}
-                  onValueChange={(value) => setProgressDrafts((current) => ({ ...current, [task.id]: String(value[0] ?? 0) }))}
-                  onValueCommit={(value) => {
-                    const nextValue = value[0] ?? 0;
-                    setActiveCell(null);
-                    setProgressDrafts((current) => {
-                      const next = { ...current };
-                      delete next[task.id];
-                      return next;
-                    });
-                    void patchTask(task, { percentComplete: nextValue });
-                  }}
-                  disabled={isPending}
-                >
-                  <SliderTrack>
-                    <SliderRange />
-                  </SliderTrack>
-                  <SliderThumb />
-                </SliderRoot>
-                <p className="text-xs text-muted-foreground">Use 5% steps to keep updates consistent.</p>
-              </div>
-            </PopoverContent>
-          </PopoverRoot>
+              </PopoverContent>
+            </PopoverRoot>
+          )}
         </div>
 
         <div onClick={(event) => event.stopPropagation()}>
           {startActive ? (
             <DatePickerField
-              value={task.plannedStart ?? task.computedPlannedStart}
+              value={plannerDisplayStart(task)}
               open
               onOpenChange={(open) => {
                 if (!open) {
@@ -701,7 +1109,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               onClick={() => setActiveCell({ taskId: task.id, field: "start" })}
               disabled={isPending}
             >
-              {formatShortDate(task.plannedStart ?? task.computedPlannedStart)}
+              {formatShortDate(plannerDisplayStart(task))}
             </button>
           )}
         </div>
@@ -709,7 +1117,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         <div onClick={(event) => event.stopPropagation()}>
           {dueActive ? (
             <DatePickerField
-              value={task.plannedEnd ?? task.computedPlannedEnd}
+              value={plannerDisplayEnd(task)}
               open
               onOpenChange={(open) => {
                 if (!open) {
@@ -730,7 +1138,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               onClick={() => setActiveCell({ taskId: task.id, field: "due" })}
               disabled={isPending}
             >
-              {formatShortDate(task.plannedEnd ?? task.computedPlannedEnd)}
+              {formatShortDate(plannerDisplayEnd(task))}
             </button>
           )}
         </div>
@@ -811,15 +1219,297 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               {isPending ? <Spinner /> : "•••"}
             </Button>
           </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => openEditDialog(task.id)}>Edit task</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => openCreateDialog("task", task.id)}>Add subtask</DropdownMenuItem>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => openEditDialog(task.id)}>
+              {task.isSummary ? "Edit section" : "Edit task"}
+            </DropdownMenuItem>
+            {task.isSummary ? (
+              <>
+                <DropdownMenuItem
+                  onClick={() =>
+                    openCreateDialog("task", task.id, {
+                      createParentLocked: true,
+                      allowedCreateTypes: ["task", "summary", "milestone"],
+                    })
+                  }
+                >
+                  Add child item
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() =>
+                    openCreateDialog("summary", task.id, {
+                      createParentLocked: true,
+                      allowedCreateTypes: ["summary", "task", "milestone"],
+                    })
+                  }
+                >
+                  Add subsection
+                </DropdownMenuItem>
+              </>
+            ) : (
+              <>
+                {task.type === "task" ? (
+                  <DropdownMenuItem onClick={() => void createCheckpointForTask(task)}>Add checkpoint</DropdownMenuItem>
+                ) : null}
+                <DropdownMenuItem onClick={() => void wrapTask(task)}>Wrap in section</DropdownMenuItem>
+              </>
+            )}
             <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => void removeTask(task.id)}>
-              Delete task
+              {task.isSummary ? "Delete section" : "Delete task"}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenuRoot>
       </div>
+    );
+  }
+
+  function renderCheckpointRows(task: PlannedTask, depth: number) {
+    if (task.checkpoints.length === 0) {
+      return null;
+    }
+
+    const visibleCheckpoints = search.trim().length
+      ? task.checkpoints.filter((checkpoint) => checkpoint.name.toLowerCase().includes(search.trim().toLowerCase()))
+      : task.checkpoints;
+
+    if (visibleCheckpoints.length === 0) {
+      return null;
+    }
+
+    return (
+      <CollapsibleContent>
+        <div className="border-b border-border/60 bg-muted/5">
+          {visibleCheckpoints.map((checkpoint, index) => {
+            const draft = checkpointDraft(checkpoint);
+            const isPending = Boolean(pendingCheckpointIds[checkpoint.id]);
+            const isChanged =
+              draft.name !== checkpoint.name ||
+              Number(draft.percentComplete) !== checkpoint.percentComplete ||
+              Number(draft.weightPoints) !== checkpoint.weightPoints;
+            const percentComplete = Number(draft.percentComplete);
+            const weightPoints = Number(draft.weightPoints);
+            const nameActive = isCheckpointCellActive(checkpoint.id, "name");
+            const progressActive = isCheckpointCellActive(checkpoint.id, "progress");
+            const weightActive = isCheckpointCellActive(checkpoint.id, "weight");
+            const canSave =
+              isChanged &&
+              Boolean(draft.name.trim()) &&
+              Number.isFinite(weightPoints) &&
+              weightPoints >= 1 &&
+              weightPoints <= 8;
+
+            return (
+              <div
+                key={checkpoint.id}
+                className="grid items-center gap-3 border-t border-border/40 px-4 py-2 md:grid-cols-[minmax(220px,1.9fr)_144px_104px_auto]"
+                style={{ paddingLeft: `${depth * 18 + 48}px` }}
+              >
+                <div className="min-w-0">
+                  {nameActive ? (
+                    <div className="flex items-center gap-2">
+                      <InputGroup>
+                        <InputGroupField
+                          value={draft.name}
+                          onChange={(event) => setCheckpointDraft(checkpoint.id, { name: event.target.value })}
+                          disabled={isPending}
+                          autoFocus
+                        />
+                      </InputGroup>
+                      <Button
+                        size="icon-xs"
+                        disabled={isPending || !canSave}
+                        onClick={() => {
+                          setActiveCheckpointCell(null);
+                          void saveCheckpoint(task.id, checkpoint);
+                        }}
+                      >
+                        {isPending ? <Spinner /> : <Check className="size-3.5" />}
+                      </Button>
+                    </div>
+                  ) : (
+                    <button
+                      className={cn(checkpointCellButtonClass(checkpoint.id, "name"), "py-1.5 text-sm")}
+                      onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "name" })}
+                      disabled={isPending}
+                    >
+                      <span className="block truncate font-medium">{draft.name}</span>
+                    </button>
+                  )}
+                </div>
+                <div>
+                  {progressActive ? (
+                    <PopoverRoot
+                      open={progressActive}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "progress" });
+                          return;
+                        }
+
+                        setActiveCheckpointCell((current) =>
+                          current?.checkpointId === checkpoint.id && current.field === "progress" ? null : current,
+                        );
+                      }}
+                    >
+                      <PopoverTrigger asChild>
+                        <button className={cn(checkpointCellButtonClass(checkpoint.id, "progress"), "py-1")} disabled={isPending}>
+                          <CheckpointProgressPill value={Number.isFinite(percentComplete) ? percentComplete : checkpoint.percentComplete} />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-64 rounded-2xl p-4" onOpenAutoFocus={(event) => event.preventDefault()}>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium">{percentComplete}%</span>
+                            <Button
+                              size="icon-xs"
+                              disabled={isPending || !canSave}
+                              onClick={() => {
+                                setActiveCheckpointCell(null);
+                                void saveCheckpoint(task.id, checkpoint);
+                              }}
+                            >
+                              {isPending ? <Spinner /> : <Check className="size-3.5" />}
+                            </Button>
+                          </div>
+                          <SliderRoot
+                            value={[Number.isFinite(percentComplete) ? percentComplete : checkpoint.percentComplete]}
+                            min={0}
+                            max={100}
+                            step={5}
+                            onValueChange={(value) => setCheckpointDraft(checkpoint.id, { percentComplete: String(value[0] ?? 0) })}
+                            disabled={isPending}
+                          >
+                            <SliderTrack>
+                              <SliderRange />
+                            </SliderTrack>
+                            <SliderThumb />
+                          </SliderRoot>
+                        </div>
+                      </PopoverContent>
+                    </PopoverRoot>
+                  ) : (
+                    <button
+                      className={cn(checkpointCellButtonClass(checkpoint.id, "progress"), "py-1")}
+                      onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "progress" })}
+                      disabled={isPending}
+                    >
+                      <CheckpointProgressPill value={Number.isFinite(percentComplete) ? percentComplete : checkpoint.percentComplete} />
+                    </button>
+                  )}
+                </div>
+                <div>
+                  {weightActive ? (
+                    <PopoverRoot
+                      open={weightActive}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "weight" });
+                          return;
+                        }
+
+                        setActiveCheckpointCell((current) =>
+                          current?.checkpointId === checkpoint.id && current.field === "weight" ? null : current,
+                        );
+                      }}
+                    >
+                      <PopoverTrigger asChild>
+                        <button
+                          className={cn(checkpointCellButtonClass(checkpoint.id, "weight"), "py-1 text-sm text-muted-foreground")}
+                          disabled={isPending}
+                        >
+                          <span>{Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints} pts</span>
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-72 rounded-2xl p-4" onOpenAutoFocus={(event) => event.preventDefault()}>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium">
+                              {Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints} pts
+                            </span>
+                            <Button
+                              size="icon-xs"
+                              disabled={isPending || !canSave}
+                              onClick={() => {
+                                setActiveCheckpointCell(null);
+                                void saveCheckpoint(task.id, checkpoint);
+                              }}
+                            >
+                              {isPending ? <Spinner /> : <Check className="size-3.5" />}
+                            </Button>
+                          </div>
+                          <SliderRoot
+                            value={[Math.max(1, Math.min(8, Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints))]}
+                            min={1}
+                            max={8}
+                            step={1}
+                            onValueChange={(value) => setCheckpointDraft(checkpoint.id, { weightPoints: String(value[0] ?? 1) })}
+                            disabled={isPending}
+                          >
+                            <SliderTrack>
+                              <SliderRange />
+                            </SliderTrack>
+                            <SliderThumb />
+                          </SliderRoot>
+                          <div className="flex justify-between text-[11px] text-muted-foreground">
+                            <span>1</span>
+                            <span>8</span>
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </PopoverRoot>
+                  ) : (
+                    <button
+                      className={cn(checkpointCellButtonClass(checkpoint.id, "weight"), "py-1 text-sm text-muted-foreground")}
+                      onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "weight" })}
+                      disabled={isPending}
+                    >
+                      <span>{Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints} pts</span>
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-end justify-end gap-2">
+                  <DropdownMenuRoot>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon-xs" disabled={isPending}>
+                        {isPending ? <Spinner /> : "•••"}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        disabled={!canSave}
+                        onClick={() => {
+                          setActiveCheckpointCell(null);
+                          void saveCheckpoint(task.id, checkpoint);
+                        }}
+                      >
+                        Save checkpoint
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={index === 0}
+                        onClick={() => void moveCheckpointRow(task.id, checkpoint.id, "up")}
+                      >
+                        Move up
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={index === visibleCheckpoints.length - 1}
+                        onClick={() => void moveCheckpointRow(task.id, checkpoint.id, "down")}
+                      >
+                        Move down
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        className="text-destructive focus:text-destructive"
+                        onClick={() => void removeCheckpointRow(task.id, checkpoint.id)}
+                      >
+                        Delete checkpoint
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenuRoot>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </CollapsibleContent>
     );
   }
 
@@ -832,6 +1522,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
     const expanded = search.trim().length > 0 ? true : expandedMap[task.id] ?? false;
     const isSummaryRow = task.isSummary;
+    const hasExpandableContent = task.hasChildren || task.checkpoints.length > 0;
+    const comparisonItems = taskComparisonItems(task);
 
         const row = (
       <div
@@ -843,7 +1535,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         onClick={isSummaryRow ? () => void toggleTask(task.id) : undefined}
       >
         <div className="flex min-w-0 items-center gap-2" style={{ paddingLeft: `${depth * 18}px` }}>
-          {task.hasChildren ? (
+          {hasExpandableContent ? (
               <button
               className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
               onClick={(event) => {
@@ -888,7 +1580,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             {task.type === "summary" ? (
               task.notes ? <p className="truncate text-xs text-muted-foreground">{task.notes}</p> : null
             ) : (
-              <p className="truncate text-xs text-muted-foreground">{task.notes || `${task.rolledUpEffortDays} business day effort`}</p>
+              <>
+                <p className="truncate text-xs text-muted-foreground">{task.notes || `${task.rolledUpEffortDays} business day effort`}</p>
+                {comparisonItems.length > 0 ? (
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {comparisonItems.map((item) => (
+                      <span
+                        key={`${task.id}-${item}`}
+                        className="inline-flex max-w-full truncate rounded-full border border-border/70 bg-background px-2 py-0.5 text-[11px] text-muted-foreground"
+                      >
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
         </div>
@@ -908,11 +1614,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 onClick={() =>
                   openCreateDialog("task", task.id, {
                     createParentLocked: true,
-                    allowedCreateTypes: ["task", "milestone"],
+                    allowedCreateTypes: ["task", "summary", "milestone"],
                   })
                 }
               >
-                Add subtask
+                Add child item
+              </ContextMenuItem>
+              <ContextMenuItem
+                onClick={() =>
+                  openCreateDialog("summary", task.id, {
+                    createParentLocked: true,
+                    allowedCreateTypes: ["summary", "task", "milestone"],
+                  })
+                }
+              >
+                Add subsection
               </ContextMenuItem>
               <ContextMenuItem onClick={() => openEditDialog(task.id)}>Edit section</ContextMenuItem>
             </ContextMenuContent>
@@ -926,6 +1642,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             {task.childIds.map((childId) => renderListNode(childId, depth + 1))}
           </CollapsibleContent>
         ) : null}
+        {!task.isSummary && task.checkpoints.length > 0 ? renderCheckpointRows(task, depth + 1) : null}
       </CollapsibleRoot>
     );
   }
@@ -939,6 +1656,16 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
     const expanded = search.trim().length > 0 ? true : expandedMap[task.id] ?? false;
     const style = taskBarStyle(task, timeline);
+    const baselineStyle = barStyleForRange(
+      task.computedBaselinePlannedStart,
+      task.computedBaselinePlannedEnd,
+      timeline,
+    );
+    const actualStyle = barStyleForRange(
+      task.actualStart ?? task.computedActualStart,
+      task.actualEnd ?? task.computedActualEnd ?? task.actualStart ?? task.computedActualStart,
+      timeline,
+    );
     const percent = progressPercent(task);
 
     return (
@@ -998,6 +1725,18 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 <div key={date} className="border-r border-dashed border-border/60" />
               ))}
             </div>
+            {task.computedBaselinePlannedStart && task.computedBaselinePlannedEnd ? (
+              <div
+                className="absolute top-4 h-8 rounded-2xl border border-border/70 bg-muted/55"
+                style={baselineStyle}
+              />
+            ) : null}
+            {task.actualStart || task.computedActualStart ? (
+              <div
+                className="absolute top-2 h-1.5 rounded-full bg-emerald-500/90"
+                style={actualStyle}
+              />
+            ) : null}
             <div
               className={cn(
                 "absolute top-3 flex h-10 items-center overflow-hidden rounded-2xl border border-white/30 px-3 text-sm font-medium text-white shadow-sm",
@@ -1060,11 +1799,20 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 <div className="flex items-center gap-3">
                   <h1 className="text-3xl font-semibold tracking-tight">{plan.project.name}</h1>
                   <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
+                  {plan.project.baselineCapturedAt ? (
+                    <Badge variant="secondary">Baseline frozen {new Date(plan.project.baselineCapturedAt).toLocaleDateString()}</Badge>
+                  ) : null}
                   {plan.issues.length > 0 ? <Badge variant="warning">{plan.issues.length} issues</Badge> : null}
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" onClick={() => setRebaseOpen(true)}>
+                  Rebase schedule
+                </Button>
+                <Button variant="outline" onClick={() => void freezeBaseline()}>
+                  {plan.project.baselineCapturedAt ? "Reset baseline" : "Freeze baseline"}
+                </Button>
                 <Button variant="outline" onClick={() => setRenameOpen(true)}>
                   <PencilSimple />
                   Rename
@@ -1150,10 +1898,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   </Button>
                   <Button variant={statusFilter === "open" ? "default" : "outline"} onClick={() => setStatusFilter("open")}>
                     Open
-                  </Button>
-                  <Button variant={statusFilter === "blocked" ? "default" : "outline"} onClick={() => setStatusFilter("blocked")}>
-                    <FunnelSimple />
-                    Blocked
                   </Button>
                   <Button variant={statusFilter === "done" ? "default" : "outline"} onClick={() => setStatusFilter("done")}>
                     Done
@@ -1267,6 +2011,34 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         </section>
       </main>
 
+      <DialogRoot open={rebaseOpen} onOpenChange={setRebaseOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Rebase schedule</DialogTitle>
+            <DialogDescription>
+              Shift the whole forecast so the earliest planned task starts on a new date. Baseline and actual progress stay unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                New project start date
+              </label>
+              <DatePickerField value={rebaseStartDate} onChange={setRebaseStartDate} />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRebaseOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => void rebaseSchedule()} disabled={isPending || !rebaseStartDate}>
+              {isPending ? <Spinner /> : null}
+              Rebase forecast
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
       <ProjectRenameDialog
         open={renameOpen}
         onOpenChange={setRenameOpen}
@@ -1283,6 +2055,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         parentId={dialogState.parentId}
         type={dialogState.type}
         tasks={plan.tasks}
+        baselineCapturedAt={plan.project.baselineCapturedAt}
         createParentLocked={dialogState.createParentLocked}
         allowedCreateTypes={dialogState.allowedCreateTypes}
         onOpenChange={(open) =>
