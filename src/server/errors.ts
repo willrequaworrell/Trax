@@ -3,6 +3,7 @@ export type ServiceErrorCode =
   | "corrupted_project"
   | "unauthorized"
   | "baseline_required"
+  | "actual_start_required"
   | "actual_end_required";
 
 export class ServiceError extends Error {
@@ -26,6 +27,12 @@ export class ValidationError extends ServiceError {
 export class BaselineRequiredError extends ServiceError {
   constructor(message = "Freeze a baseline before recording execution progress.") {
     super(message, "baseline_required", 422);
+  }
+}
+
+export class ActualStartRequiredError extends ServiceError {
+  constructor(message = "Active tasks must include an actual start date.") {
+    super(message, "actual_start_required", 422);
   }
 }
 

@@ -437,7 +437,6 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     const baselinePlannedStart = minIsoDate(childPlans.map((child) => child.computedBaselinePlannedStart));
     const baselinePlannedEnd = maxIsoDate(childPlans.map((child) => child.computedBaselinePlannedEnd));
     const actualStart = minIsoDate(childPlans.map((child) => child.computedActualStart));
-    const actualEnd = maxIsoDate(childPlans.map((child) => child.computedActualEnd));
     const rolledUpEffortDays = childPlans.reduce((total, child) => total + child.rolledUpEffortDays, 0);
     const weightedPercent =
       rolledUpEffortDays === 0
@@ -459,6 +458,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
       : someStarted
         ? "in_progress"
         : "not_started";
+    const actualEnd = allDone ? maxIsoDate(childPlans.map((child) => child.computedActualEnd)) : null;
 
     const summaryPlan: PlannedTask = {
       ...current,

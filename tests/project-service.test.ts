@@ -277,7 +277,7 @@ test("normalizes start/end tasks with progress into in-progress", async () => {
   });
   await projectService.freezeProjectBaseline(plan.project.id);
 
-  await projectService.updateTask(created!.taskId, { percentComplete: 25 });
+  await projectService.updateTask(created!.taskId, { actualStart: "2026-03-16", percentComplete: 25 });
   const stored = await projectRepository.getTask(created!.taskId);
 
   assert.equal(stored?.status, "in_progress");
@@ -301,6 +301,48 @@ test("requires a baseline before recording execution progress", async () => {
   );
 });
 
+test("requires an actual start before recording execution progress", async () => {
+  const plan = await makeProject("actual-start-required-before-progress");
+  const created = await projectService.createTask(plan.project.id, {
+    name: "Scheduled task",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+
+  await projectService.freezeProjectBaseline(plan.project.id);
+
+  await assert.rejects(
+    projectService.updateTask(created!.taskId, { percentComplete: 25 }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "actual_start_required",
+  );
+});
+
+test("accepts execution progress when actual start is supplied in the same patch", async () => {
+  const plan = await makeProject("actual-start-with-progress");
+  const created = await projectService.createTask(plan.project.id, {
+    name: "Scheduled task",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(created!.taskId, {
+    actualStart: "2026-03-17",
+    percentComplete: 25,
+  });
+
+  const stored = await projectRepository.getTask(created!.taskId);
+
+  assert.equal(stored?.actualStart, "2026-03-17");
+  assert.equal(stored?.percentComplete, 25);
+  assert.equal(stored?.status, "in_progress");
+});
+
 test("requires an actual end before 100 percent completion can be saved", async () => {
   const plan = await makeProject("actual-end-required");
   const created = await projectService.createTask(plan.project.id, {
@@ -313,12 +355,35 @@ test("requires an actual end before 100 percent completion can be saved", async 
   await projectService.freezeProjectBaseline(plan.project.id);
 
   await assert.rejects(
-    projectService.updateTask(created!.taskId, { percentComplete: 100 }),
+    projectService.updateTask(created!.taskId, { actualStart: "2026-03-16", percentComplete: 100 }),
     (error: unknown) =>
       error instanceof Error &&
       "code" in error &&
       error.code === "actual_end_required",
   );
+});
+
+test("lowering progress below 100 clears actual end and reopens the task", async () => {
+  const plan = await makeProject("reopen-completed-task");
+  const created = await projectService.createTask(plan.project.id, {
+    name: "Scheduled task",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(created!.taskId, {
+    actualStart: "2026-03-16",
+    actualEnd: "2026-03-18",
+  });
+  await projectService.updateTask(created!.taskId, { percentComplete: 50 });
+
+  const stored = await projectRepository.getTask(created!.taskId);
+
+  assert.equal(stored?.actualEnd, null);
+  assert.equal(stored?.percentComplete, 50);
+  assert.equal(stored?.status, "in_progress");
 });
 
 test("rejects converting a dependency-linked leaf task into a summary", async () => {
@@ -382,7 +447,10 @@ test("normalizes start/end tasks with actual completion into done", async () => 
   });
   await projectService.freezeProjectBaseline(plan.project.id);
 
-  await projectService.updateTask(created!.taskId, { actualEnd: "2026-03-18" });
+  await projectService.updateTask(created!.taskId, {
+    actualStart: "2026-03-16",
+    actualEnd: "2026-03-18",
+  });
   const stored = await projectRepository.getTask(created!.taskId);
 
   assert.equal(stored?.status, "done");
@@ -716,6 +784,7 @@ test("derives task progress from checkpoints while keeping task schedule fields"
     plannedDurationDays: 5,
   });
   await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(task!.taskId, { actualStart: "2026-03-16" });
 
   await projectService.createCheckpoint(task!.taskId, {
     name: "Build selectors",
@@ -738,6 +807,38 @@ test("derives task progress from checkpoints while keeping task schedule fields"
   assert.equal(plannedTask?.isProgressDerived, true);
   assert.equal(plannedTask?.rolledUpPercentComplete, 69);
   assert.equal(plannedTask?.checkpoints.length, 2);
+});
+
+test("lowering checkpoint progress clears the parent task actual end", async () => {
+  const plan = await makeProject("checkpoint-reopens-parent-task");
+  const task = await projectService.createTask(plan.project.id, {
+    name: "Develop automation solution",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 5,
+  });
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(task!.taskId, {
+    actualStart: "2026-03-16",
+    actualEnd: "2026-03-20",
+  });
+
+  const withCheckpoint = await projectService.createCheckpoint(task!.taskId, {
+    name: "Build selectors",
+    percentComplete: 100,
+    weightPoints: 1,
+  });
+  const checkpoint = withCheckpoint?.tasks.find((item) => item.id === task!.taskId)?.checkpoints[0];
+
+  assert.ok(checkpoint);
+
+  await projectService.updateCheckpoint(checkpoint.id, { percentComplete: 50 });
+
+  const stored = await projectRepository.getTask(task!.taskId);
+
+  assert.equal(stored?.actualEnd, null);
+  assert.equal(stored?.percentComplete, 50);
+  assert.equal(stored?.status, "in_progress");
 });
 
 test("rejects checkpoints on summaries and milestones", async () => {
@@ -778,6 +879,27 @@ test("rejects checkpoints on summaries and milestones", async () => {
   );
 });
 
+test("requires an actual start before checkpoint progress can begin", async () => {
+  const plan = await makeProject("checkpoint-actual-start-required");
+  const task = await projectService.createTask(plan.project.id, {
+    name: "Develop automation solution",
+    type: "task",
+  });
+  await projectService.freezeProjectBaseline(plan.project.id);
+
+  await assert.rejects(
+    projectService.createCheckpoint(task!.taskId, {
+      name: "Checkpoint A",
+      percentComplete: 25,
+      weightPoints: 1,
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "actual_start_required",
+  );
+});
+
 test("blocks manual percent edits while checkpoints exist and restores direct editing after removal", async () => {
   const plan = await makeProject("checkpoint-progress-guards");
   const task = await projectService.createTask(plan.project.id, {
@@ -785,6 +907,7 @@ test("blocks manual percent edits while checkpoints exist and restores direct ed
     type: "task",
   });
   await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(task!.taskId, { actualStart: "2026-03-16" });
 
   const withFirstCheckpoint = await projectService.createCheckpoint(task!.taskId, {
     name: "Checkpoint A",
@@ -885,6 +1008,7 @@ test("undo restores a deleted section subtree with checkpoints and dependencies"
     plannedDurationDays: 3,
   });
   await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(child!.taskId, { actualStart: "2026-03-17" });
 
   await projectService.createCheckpoint(child!.taskId, {
     name: "Checkpoint A",
@@ -925,6 +1049,10 @@ test("deleting a checkpoint creates undo metadata and undo restores parent progr
     type: "task",
   });
   await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(task!.taskId, {
+    actualStart: "2026-03-16",
+    actualEnd: "2026-03-17",
+  });
 
   await projectService.createCheckpoint(task!.taskId, {
     name: "Checkpoint A",

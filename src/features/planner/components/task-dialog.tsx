@@ -151,10 +151,14 @@ export function TaskDialog({
   const [submitting, setSubmitting] = useState(false);
   const [baselineGateOpen, setBaselineGateOpen] = useState(false);
   const [baselineGatePending, setBaselineGatePending] = useState(false);
+  const [actualStartGateOpen, setActualStartGateOpen] = useState(false);
+  const [actualStartGatePending, setActualStartGatePending] = useState(false);
+  const [actualStartDraft, setActualStartDraft] = useState<string | null>(null);
   const [actualEndGateOpen, setActualEndGateOpen] = useState(false);
   const [actualEndGatePending, setActualEndGatePending] = useState(false);
   const [actualEndDraft, setActualEndDraft] = useState<string | null>(null);
   const baselineGateActionRef = useRef<(() => Promise<void>) | null>(null);
+  const actualStartGateActionRef = useRef<((actualStart: string) => Promise<void>) | null>(null);
   const actualEndGateActionRef = useRef<((actualEnd: string) => Promise<void>) | null>(null);
   const taskMap = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
   const disallowedParentIds = useMemo(() => {
@@ -216,6 +220,7 @@ export function TaskDialog({
       lagDays: 0,
     });
     setPendingDependencies([]);
+    setActualStartDraft(task?.actualStart ?? task?.plannedStart ?? task?.computedPlannedStart ?? isoToday());
     setActualEndDraft(task?.actualEnd ?? task?.computedPlannedEnd ?? isoToday());
   }, [mode, parentId, task, type, createParentLocked]);
 
@@ -230,8 +235,30 @@ export function TaskDialog({
     setActualEndGateOpen(true);
   }
 
-  function draftHasExecutionSignal() {
-    return Boolean(draft.actualStart || draft.actualEnd || draft.percentComplete > 0);
+  function openActualStartGate(action: (actualStart: string) => Promise<void>) {
+    actualStartGateActionRef.current = action;
+    setActualStartDraft(draft.actualStart ?? task?.actualStart ?? task?.plannedStart ?? task?.computedPlannedStart ?? isoToday());
+    setActualStartGateOpen(true);
+  }
+
+  function draftHasExecutionSignal(nextDraft = draft) {
+    return Boolean(nextDraft.actualStart || nextDraft.actualEnd || nextDraft.percentComplete > 0);
+  }
+
+  function draftNeedsActualStart(nextDraft = draft) {
+    return !isSummaryTask && !nextDraft.actualStart && (nextDraft.percentComplete > 0 || Boolean(nextDraft.actualEnd));
+  }
+
+  function draftNeedsActualEnd(nextDraft = draft) {
+    return !isSummaryTask && nextDraft.percentComplete >= 100 && !nextDraft.actualEnd;
+  }
+
+  function applyPercentComplete(nextPercent: number) {
+    setDraft((current) => ({
+      ...current,
+      percentComplete: nextPercent,
+      actualEnd: nextPercent < 100 ? null : current.actualEnd,
+    }));
   }
 
   async function requestJson(input: RequestInfo, init?: RequestInit) {
@@ -320,47 +347,29 @@ export function TaskDialog({
     onOpenChange(false);
   }
 
-  async function handleSave() {
-    if (!isSummaryTask && draft.percentComplete >= 100 && !draft.actualEnd) {
-      openActualEndGate(async (actualEnd) => {
-        setDraft((current) => ({ ...current, actualEnd }));
+  async function saveWithGates(override?: Partial<Draft>) {
+    const nextDraft = { ...draft, ...override };
 
-        if (!baselineCapturedAt && draftHasExecutionSignal()) {
-          openBaselineGate(async () => {
-            await freezeBaselineRequest();
-            setDraft((current) => ({ ...current, actualEnd }));
-            setSubmitting(true);
-
-            try {
-              await performSave({ actualEnd });
-            } finally {
-              setSubmitting(false);
-            }
-          });
-          return;
-        }
-
-        setSubmitting(true);
-
-        try {
-          await performSave({ actualEnd });
-        } finally {
-          setSubmitting(false);
-        }
+    if (mode === "edit" && !isSummaryTask && !baselineCapturedAt && draftHasExecutionSignal(nextDraft)) {
+      openBaselineGate(async () => {
+        await freezeBaselineRequest();
+        await saveWithGates(override);
       });
       return;
     }
 
-    if (mode === "edit" && !isSummaryTask && !baselineCapturedAt && draftHasExecutionSignal()) {
-      openBaselineGate(async () => {
-        await freezeBaselineRequest();
-        setSubmitting(true);
+    if (draftNeedsActualStart(nextDraft)) {
+      openActualStartGate(async (actualStart) => {
+        setDraft((current) => ({ ...current, actualStart }));
+        await saveWithGates({ ...override, actualStart });
+      });
+      return;
+    }
 
-        try {
-          await performSave();
-        } finally {
-          setSubmitting(false);
-        }
+    if (draftNeedsActualEnd(nextDraft)) {
+      openActualEndGate(async (actualEnd) => {
+        setDraft((current) => ({ ...current, actualEnd }));
+        await saveWithGates({ ...override, actualEnd });
       });
       return;
     }
@@ -368,12 +377,16 @@ export function TaskDialog({
     setSubmitting(true);
 
     try {
-      await performSave();
+      await performSave(override);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to save task.");
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSave() {
+    await saveWithGates();
   }
 
   async function handleDelete() {
@@ -816,7 +829,14 @@ export function TaskDialog({
                         step={5}
                         onValueChange={(value) => {
                           const nextPercent = value[0] ?? 0;
-                          setDraft((current) => ({ ...current, percentComplete: nextPercent }));
+                          applyPercentComplete(nextPercent);
+
+                          if (nextPercent > 0 && !draft.actualStart) {
+                            openActualStartGate(async (actualStart) => {
+                              setDraft((current) => ({ ...current, actualStart }));
+                            });
+                            return;
+                          }
 
                           if (nextPercent >= 100 && !draft.actualEnd) {
                             openActualEndGate(async (actualEnd) => {
@@ -1094,6 +1114,72 @@ export function TaskDialog({
             >
               {baselineGatePending ? <Spinner /> : null}
               Freeze baseline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={actualStartGateOpen}
+        onOpenChange={(open) => {
+          setActualStartGateOpen(open);
+
+          if (!open) {
+            actualStartGateActionRef.current = null;
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Actual start required</DialogTitle>
+            <DialogDescription>
+              Active work needs an actual start date before progress can be recorded.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Actual start</label>
+              <DatePickerField value={actualStartDraft} onChange={setActualStartDraft} />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setActualStartGateOpen(false);
+                actualStartGateActionRef.current = null;
+              }}
+              disabled={actualStartGatePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const action = actualStartGateActionRef.current;
+
+                if (!action || !actualStartDraft) {
+                  toast.error("Choose an actual start date.");
+                  return;
+                }
+
+                void (async () => {
+                  setActualStartGatePending(true);
+
+                  try {
+                    await action(actualStartDraft);
+                    setActualStartGateOpen(false);
+                    actualStartGateActionRef.current = null;
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Failed to save the actual start date.");
+                  } finally {
+                    setActualStartGatePending(false);
+                  }
+                })();
+              }}
+              disabled={actualStartGatePending || !actualStartDraft}
+            >
+              {actualStartGatePending ? <Spinner /> : null}
+              Save actual start
             </Button>
           </DialogFooter>
         </DialogContent>

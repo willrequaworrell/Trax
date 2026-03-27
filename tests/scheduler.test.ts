@@ -251,6 +251,39 @@ test("rolls in-progress state to the parent summary without changing scheduling"
   assert.equal(summary?.rolledUpStatus, "in_progress");
 });
 
+test("does not roll up an actual end to a summary until all children are complete", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({ id: "summary", name: "Phase", type: "summary", plannedMode: null, plannedStart: null, plannedDurationDays: null }),
+      makeTask({
+        id: "done_child",
+        name: "Done child",
+        parentId: "summary",
+        sortOrder: 10,
+        plannedStart: "2026-03-16",
+        plannedDurationDays: 1,
+        actualStart: "2026-03-16",
+        actualEnd: "2026-03-16",
+      }),
+      makeTask({
+        id: "open_child",
+        name: "Open child",
+        parentId: "summary",
+        sortOrder: 20,
+        plannedStart: "2026-03-17",
+        plannedDurationDays: 2,
+      }),
+    ],
+    dependencies: [],
+    checkpoints: [],
+  });
+
+  const summary = plan.tasks.find((task) => task.id === "summary");
+  assert.equal(summary?.computedActualStart, "2026-03-16");
+  assert.equal(summary?.computedActualEnd, null);
+});
+
 test("derives task progress from checkpoints without changing task scheduling", () => {
   const plan = computeProjectPlan({
     project: makeProject(),

@@ -38,7 +38,7 @@ import {
 import { computeCheckpointPercent } from "@/domain/checkpoints";
 import { computeProjectPlan } from "@/domain/scheduler";
 import { checkpoints, dependencies, pendingDeleteActions, projects, tasks } from "@/server/db/schema";
-import { ActualEndRequiredError, BaselineRequiredError, CorruptedProjectError, ValidationError } from "@/server/errors";
+import { ActualEndRequiredError, ActualStartRequiredError, BaselineRequiredError, CorruptedProjectError, ValidationError } from "@/server/errors";
 import { toCheckpointInsert, toDependencyInsert, toPendingDeleteActionInsert, toTaskInsert } from "@/server/repositories/mappers";
 import { projectRepository } from "@/server/repositories/project-repository";
 import { cascadeForecastFromSeeds, rebaseForecastTasks } from "@/server/services/forecast-schedule";
@@ -119,10 +119,30 @@ function ensureActualEndForCompletion(existing: Task, patch: TaskUpdateInput) {
   }
 
   const nextPercent = patch.percentComplete ?? existing.percentComplete;
-  const nextActualEnd = patch.actualEnd ?? existing.actualEnd;
+  const nextActualEnd =
+    patch.percentComplete !== undefined && patch.percentComplete < 100 && patch.actualEnd === undefined
+      ? null
+      : patch.actualEnd ?? existing.actualEnd;
 
   if (nextPercent >= 100 && !nextActualEnd) {
     throw new ActualEndRequiredError();
+  }
+}
+
+function ensureActualStartForExecution(existing: Task, patch: TaskUpdateInput) {
+  if (existing.type === "summary") {
+    return;
+  }
+
+  const nextPercent = patch.percentComplete ?? existing.percentComplete;
+  const nextActualStart = patch.actualStart ?? existing.actualStart;
+  const nextActualEnd =
+    patch.percentComplete !== undefined && patch.percentComplete < 100 && patch.actualEnd === undefined
+      ? null
+      : patch.actualEnd ?? existing.actualEnd;
+
+  if ((nextPercent > 0 || nextActualEnd) && !nextActualStart) {
+    throw new ActualStartRequiredError();
   }
 }
 
@@ -713,15 +733,16 @@ async function restoreDependencyPendingDeleteAction(action: PendingDeleteAction)
 
 function deriveTaskProgressFromCheckpoints(task: Task, checkpoints: Checkpoint[]) {
   const percentComplete = computeCheckpointPercent(checkpoints);
+  const actualEnd = percentComplete >= 100 ? task.actualEnd : null;
   const status = normalizeStoredTaskStatus({
     type: task.type,
     status: task.status,
     percentComplete,
     actualStart: task.actualStart,
-    actualEnd: task.actualEnd,
+    actualEnd,
   });
 
-  return { percentComplete, status };
+  return { percentComplete, status, actualEnd };
 }
 
 async function syncTaskProgressFromCheckpoints(taskId: string) {
@@ -737,11 +758,12 @@ async function syncTaskProgressFromCheckpoints(taskId: string) {
     return;
   }
 
-  const { percentComplete, status } = deriveTaskProgressFromCheckpoints(task, checkpoints);
+  const { percentComplete, status, actualEnd } = deriveTaskProgressFromCheckpoints(task, checkpoints);
 
   await projectRepository.updateTask(taskId, {
     percentComplete,
     status,
+    actualEnd,
     updatedAt: now(),
   });
 }
@@ -781,7 +803,14 @@ function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Tas
 
   const nextType = merged.type;
   const nextActualStart = patch.actualStart ?? existing.actualStart;
-  const nextActualEnd = patch.actualEnd ?? existing.actualEnd;
+  const nextActualEnd =
+    patch.percentComplete !== undefined && patch.percentComplete < 100 && patch.actualEnd === undefined
+      ? null
+      : patch.actualEnd ?? existing.actualEnd;
+
+  if (patch.percentComplete !== undefined && patch.percentComplete < 100 && patch.actualEnd === undefined) {
+    normalized.actualEnd = null;
+  }
 
   if (nextType !== "summary" && patch.actualStart !== undefined && nextActualStart) {
     normalized.plannedStart = nextActualStart;
@@ -946,6 +975,7 @@ export async function updateTask(taskId: string, input: TaskUpdateInput) {
   }
 
   ensureBaselineCaptured(snapshot.project, existing, parsed);
+  ensureActualStartForExecution(existing, parsed);
   ensureActualEndForCompletion(existing, parsed);
   validateTaskParent(snapshot.tasks, existing.id, nextParentId);
   const normalized = normalizeTaskPatch(existing, parsed);
@@ -1086,6 +1116,10 @@ export async function createCheckpoint(taskId: string, input: CheckpointCreateIn
     },
   ]);
 
+  if (nextTaskPercent > 0 && !task.actualStart) {
+    throw new ActualStartRequiredError();
+  }
+
   if (nextTaskPercent >= 100 && !task.actualEnd) {
     throw new ActualEndRequiredError();
   }
@@ -1142,6 +1176,10 @@ export async function updateCheckpoint(checkpointId: string, input: CheckpointUp
       : item,
   );
   const nextTaskPercent = computeCheckpointPercent(nextCheckpoints);
+
+  if (nextTaskPercent > 0 && !task.actualStart) {
+    throw new ActualStartRequiredError();
+  }
 
   if (nextTaskPercent >= 100 && !task.actualEnd) {
     throw new ActualEndRequiredError();
