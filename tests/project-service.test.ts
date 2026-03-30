@@ -7,6 +7,7 @@ import { checkpoints, dependencies, pendingDeleteActions, projects, tasks } from
 import { getDb } from "@/server/db/client";
 import { projectRepository } from "@/server/repositories/project-repository";
 import * as projectService from "@/server/services/project-service";
+import { GET as exportProjectRoute } from "@/app/api/projects/[projectId]/export/route";
 import { POST as freezeBaselineRoute } from "@/app/api/projects/[projectId]/freeze-baseline/route";
 import { POST as rebaseProjectRoute } from "@/app/api/projects/[projectId]/rebase/route";
 import { GET as getProjectRoute } from "@/app/api/projects/[projectId]/route";
@@ -1364,4 +1365,136 @@ test("rebase and freeze routes return updated plans", async () => {
     rebasePayload.tasks.find((task: Task) => task.id === created!.taskId)?.plannedStart,
     "2026-03-23",
   );
+});
+
+test("exportProject returns actual-first markdown and enriched json", async () => {
+  projectService.__testUtils.setNowOverride("2026-03-30T15:00:00.000Z");
+
+  const plan = await makeProject("export-refresh");
+  const section = await projectService.createTask(plan.project.id, {
+    name: "Define",
+    type: "summary",
+  });
+  const inProgress = await projectService.createTask(plan.project.id, {
+    name: "In progress task",
+    type: "task",
+    parentId: section!.taskId,
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+  const completed = await projectService.createTask(plan.project.id, {
+    name: "Completed task",
+    type: "task",
+    parentId: section!.taskId,
+    plannedStart: "2026-03-18",
+    plannedDurationDays: 1,
+  });
+  const notStarted = await projectService.createTask(plan.project.id, {
+    name: "Not started task",
+    type: "task",
+    parentId: section!.taskId,
+    plannedStart: "2026-03-19",
+    plannedDurationDays: 2,
+  });
+
+  await projectService.createCheckpoint(notStarted!.taskId, {
+    name: "Checkpoint A",
+    percentComplete: 0,
+    weightPoints: 2,
+  });
+
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(inProgress!.taskId, {
+    actualStart: "2026-03-17",
+    percentComplete: 50,
+  });
+  await projectService.updateTask(completed!.taskId, {
+    actualStart: "2026-03-18",
+    actualEnd: "2026-03-20",
+  });
+  await projectService.createDependency(plan.project.id, {
+    predecessorTaskId: inProgress!.taskId,
+    successorTaskId: notStarted!.taskId,
+    type: "FS",
+    lagDays: 0,
+  });
+  await projectService.createDependency(plan.project.id, {
+    predecessorTaskId: notStarted!.taskId,
+    successorTaskId: inProgress!.taskId,
+    type: "FS",
+    lagDays: 0,
+  });
+
+  const exported = await projectService.exportProject(plan.project.id);
+
+  assert.ok(exported);
+  assert.equal(exported.json.exportVersion, 2);
+  assert.equal(exported.json.generatedAt, "2026-03-30T15:00:00.000Z");
+  assert.equal(exported.json.projectPercentComplete > 0, true);
+  assert.ok(Array.isArray(exported.json.rows));
+  assert.ok(Array.isArray(exported.json.blockedTaskIds));
+  assert.ok(Array.isArray(exported.json.upcomingTaskIds));
+  assert.ok(Array.isArray(exported.json.pendingUndoActions));
+  assert.equal(exported.json.tasks.some((task) => task.id === inProgress!.taskId), true);
+  assert.equal(exported.json.dependencies.length, 2);
+
+  assert.match(exported.markdown, /## Current Project Status/);
+  assert.match(exported.markdown, /Forecast timeline:/);
+  assert.match(exported.markdown, /Baseline: captured 2026-03-30T15:00:00.000Z/);
+  assert.doesNotMatch(exported.markdown, /\| planned /);
+  assert.match(exported.markdown, /\| forecast /);
+  assert.match(exported.markdown, /\| baseline /);
+  assert.match(exported.markdown, /\| actual /);
+  assert.match(exported.markdown, /variance vs baseline/);
+  assert.match(exported.markdown, /checkpoint Checkpoint A \| progress 0% \| weight 2/);
+  assert.match(exported.markdown, /issues:/);
+  assert.match(exported.markdown, /Define \| type section/);
+  assert.match(exported.markdown, /Define \| type section .* actual 2026-03-17 -> TBD /);
+  assert.match(exported.markdown, /In progress task \| type task \| status in_progress \| progress 50% \| current 2026-03-17 -> 2026-03-18 \(actual_start_forecast_end\)/);
+  assert.match(exported.markdown, /Completed task \| type task \| status done \| progress 100% \| current 2026-03-18 -> 2026-03-20 \(actual\)/);
+  assert.match(exported.markdown, /Not started task \| type task \| status not_started \| progress 0% \| current .* \(forecast\)/);
+
+  const defineIndex = exported.markdown.indexOf("- Define | type section");
+  const inProgressIndex = exported.markdown.indexOf("  - In progress task | type task");
+  const completedIndex = exported.markdown.indexOf("  - Completed task | type task");
+  const notStartedIndex = exported.markdown.indexOf("  - Not started task | type task");
+
+  assert.ok(defineIndex >= 0);
+  assert.ok(inProgressIndex > defineIndex);
+  assert.ok(completedIndex > inProgressIndex);
+  assert.ok(notStartedIndex > completedIndex);
+});
+
+test("export route returns markdown and enriched json without changing the API", async () => {
+  projectService.__testUtils.setNowOverride("2026-03-30T15:00:00.000Z");
+
+  const plan = await makeProject("export-route");
+  await projectService.createTask(plan.project.id, {
+    name: "Route task",
+    type: "task",
+    plannedStart: "2026-03-16",
+    plannedDurationDays: 2,
+  });
+
+  const markdownResponse = await exportProjectRoute(
+    new Request(`http://localhost/api/projects/${plan.project.id}/export?format=markdown`),
+    { params: Promise.resolve({ projectId: plan.project.id }) },
+  );
+  const markdownPayload = await markdownResponse.text();
+
+  assert.equal(markdownResponse.status, 200);
+  assert.match(markdownPayload, /# export-route/);
+  assert.match(markdownPayload, /## Task Hierarchy/);
+
+  const jsonResponse = await exportProjectRoute(
+    new Request(`http://localhost/api/projects/${plan.project.id}/export`),
+    { params: Promise.resolve({ projectId: plan.project.id }) },
+  );
+  const jsonPayload = await jsonResponse.json();
+
+  assert.equal(jsonResponse.status, 200);
+  assert.equal(jsonPayload.exportVersion, 2);
+  assert.equal(jsonPayload.generatedAt, "2026-03-30T15:00:00.000Z");
+  assert.ok(Array.isArray(jsonPayload.rows));
+  assert.ok(Array.isArray(jsonPayload.pendingUndoActions));
 });

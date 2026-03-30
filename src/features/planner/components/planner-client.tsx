@@ -1404,7 +1404,16 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     });
   }
 
-  async function copyExport(formatMode: "markdown" | "json") {
+  function exportFilename(formatMode: "markdown" | "json") {
+    const slug = plan.project.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "project";
+
+    return `${slug}-export.${formatMode === "markdown" ? "md" : "json"}`;
+  }
+
+  async function downloadExport(formatMode: "markdown" | "json") {
     try {
       const response = await fetch(`/api/projects/${plan.project.id}/export?format=${formatMode}`);
 
@@ -1413,12 +1422,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         throw new Error(payload?.error ?? "Failed to load export.");
       }
 
-      const content =
-        formatMode === "markdown" ? await response.text() : JSON.stringify(await response.json(), null, 2);
-      await navigator.clipboard.writeText(content);
-      toast.success(`${formatMode === "markdown" ? "Markdown" : "JSON"} export copied`);
+      const content = formatMode === "markdown" ? await response.text() : JSON.stringify(await response.json(), null, 2);
+      const blob = new Blob([content], {
+        type: formatMode === "markdown" ? "text/markdown;charset=utf-8" : "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = exportFilename(formatMode);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`${formatMode === "markdown" ? "Markdown" : "JSON"} export downloaded`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to copy export.");
+      toast.error(error instanceof Error ? error.message : "Failed to download export.");
     }
   }
 
@@ -2429,13 +2447,13 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                         Rename
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => void copyExport("markdown")}>
+                      <DropdownMenuItem onClick={() => void downloadExport("markdown")}>
                         <DownloadSimple />
-                        Copy Markdown export
+                        Download Markdown export
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => void copyExport("json")}>
+                      <DropdownMenuItem onClick={() => void downloadExport("json")}>
                         <DownloadSimple />
-                        Copy JSON snapshot
+                        Download JSON snapshot
                       </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenuRoot>

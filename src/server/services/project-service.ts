@@ -1,5 +1,5 @@
 import { and, eq, inArray, or } from "drizzle-orm";
-import { addDurationToStart, businessDaysInclusive, clampToBusinessDay } from "@/domain/date-utils";
+import { addDurationToStart, businessDaysInclusive, clampToBusinessDay, shiftBusinessDays } from "@/domain/date-utils";
 import {
   checkpointCreateSchema,
   checkpointMoveSchema,
@@ -190,46 +190,171 @@ async function cascadeProjectForecast(projectId: string, seedTaskIds: string[], 
   await persistForecastChanges(projectId, nextTasks);
 }
 
+function exportDate(value: string | null) {
+  return value ?? "TBD";
+}
+
+function exportTaskType(task: ProjectPlan["tasks"][number]) {
+  return task.isSummary ? "section" : task.type;
+}
+
+function exportTaskStatus(task: ProjectPlan["tasks"][number]) {
+  return task.rolledUpStatus;
+}
+
+function exportTaskProgress(task: ProjectPlan["tasks"][number]) {
+  return task.isSummary ? task.rolledUpPercentComplete : task.percentComplete;
+}
+
+function exportTaskCurrentDates(task: ProjectPlan["tasks"][number]) {
+  const actualStart = task.computedActualStart;
+  const actualEnd = task.computedActualEnd;
+  const forecastStart = task.computedPlannedStart;
+  const forecastEnd = task.computedPlannedEnd;
+
+  if (actualStart && actualEnd) {
+    return {
+      start: actualStart,
+      end: actualEnd,
+      mode: "actual" as const,
+    };
+  }
+
+  if (actualStart) {
+    return {
+      start: actualStart,
+      end: forecastEnd,
+      mode: "actual_start_forecast_end" as const,
+    };
+  }
+
+  return {
+    start: forecastStart,
+    end: forecastEnd,
+    mode: "forecast" as const,
+  };
+}
+
+function signedBusinessDayGap(from: string, to: string) {
+  if (from === to) {
+    return 0;
+  }
+
+  if (to > from) {
+    let cursor = from;
+    let offset = 0;
+
+    while (cursor < to) {
+      cursor = shiftBusinessDays(cursor, 1);
+      offset += 1;
+    }
+
+    return offset;
+  }
+
+  let cursor = from;
+  let offset = 0;
+
+  while (cursor > to) {
+    cursor = shiftBusinessDays(cursor, -1);
+    offset -= 1;
+  }
+
+  return offset;
+}
+
+function exportBaselineVariance(task: ProjectPlan["tasks"][number]) {
+  const current = exportTaskCurrentDates(task);
+  const baselineEnd = task.computedBaselinePlannedEnd;
+
+  if (!current.end || !baselineEnd) {
+    return "n/a";
+  }
+
+  const delta = signedBusinessDayGap(baselineEnd, current.end);
+
+  if (delta === 0) {
+    return "on baseline";
+  }
+
+  return delta > 0 ? `+${delta} business days after baseline` : `${Math.abs(delta)} business days before baseline`;
+}
+
 function exportMarkdown(plan: ProjectPlan) {
   const taskMap = new Map(plan.tasks.map((task) => [task.id, task]));
-  const blockedTasks = plan.blockedTaskIds.map((id) => taskMap.get(id)).filter(Boolean);
-  const upcomingTasks = plan.upcomingTaskIds.map((id) => taskMap.get(id)).filter(Boolean);
-  const timelineLine = `${plan.timelineStart ?? "TBD"} -> ${plan.timelineEnd ?? "TBD"}`;
-
-  return [
+  const blockedTasks = plan.blockedTaskIds
+    .map((id) => taskMap.get(id))
+    .filter((task): task is NonNullable<typeof task> => Boolean(task));
+  const upcomingTasks = plan.upcomingTaskIds
+    .map((id) => taskMap.get(id))
+    .filter((task): task is NonNullable<typeof task> => Boolean(task));
+  const tasksByStatus = {
+    done: plan.tasks.filter((task) => task.rolledUpStatus === "done").length,
+    inProgress: plan.tasks.filter((task) => task.rolledUpStatus === "in_progress").length,
+    notStarted: plan.tasks.filter((task) => task.rolledUpStatus === "not_started").length,
+  };
+  const lines = [
     `# ${plan.project.name}`,
     "",
-    plan.project.description,
+    plan.project.description || "_No description_",
     "",
-    `Timeline: ${timelineLine}`,
+    "## Current Project Status",
+    `- Progress: ${plan.projectPercentComplete}% complete`,
+    `- Forecast timeline: ${exportDate(plan.timelineStart)} -> ${exportDate(plan.timelineEnd)}`,
+    `- Baseline: ${plan.project.baselineCapturedAt ? `captured ${plan.project.baselineCapturedAt}` : "not frozen"}`,
+    `- Tasks: ${tasksByStatus.inProgress} in progress, ${tasksByStatus.notStarted} not started, ${tasksByStatus.done} done`,
+    `- Upcoming work: ${upcomingTasks.length}`,
+    `- Blocked or risky tasks: ${blockedTasks.length}`,
     "",
-    "## Upcoming Work",
-    ...upcomingTasks.map(
-      (task) =>
-        `- ${task?.name}: ${task?.computedPlannedStart ?? "TBD"} to ${task?.computedPlannedEnd ?? "TBD"} (${task?.computedPlannedDurationDays ?? 0} business days)`,
-    ),
-    "",
-    "## Blocked Or Risky Tasks",
+    "## Blocked Or Risky Work",
     ...(blockedTasks.length > 0
-      ? blockedTasks.map(
-          (task) =>
-            `- ${task?.name}: ${(task?.issues ?? []).map((issue) => issue.message).join("; ") || "Blocked or invalid schedule state"}`,
-        )
+      ? blockedTasks.map((task) => {
+          const current = exportTaskCurrentDates(task);
+
+          return `- ${task.name} | status ${exportTaskStatus(task)} | progress ${exportTaskProgress(task)}% | current ${exportDate(current.start)} -> ${exportDate(current.end)} | issues ${(task.issues ?? []).map((issue) => issue.message).join("; ") || "Blocked or invalid schedule state"}`;
+        })
       : ["- None"]),
     "",
     "## Active Dependencies",
-    ...plan.dependencies.map(
-      (dependency) =>
-        `- ${taskMap.get(dependency.predecessorTaskId)?.name ?? dependency.predecessorTaskId} ${dependency.type} ${taskMap.get(dependency.successorTaskId)?.name ?? dependency.successorTaskId} (lag ${dependency.lagDays})`,
-    ),
+    ...(plan.dependencies.length > 0
+      ? plan.dependencies.map(
+          (dependency) =>
+            `- ${taskMap.get(dependency.predecessorTaskId)?.name ?? dependency.predecessorTaskId} ${dependency.type} ${taskMap.get(dependency.successorTaskId)?.name ?? dependency.successorTaskId} (lag ${dependency.lagDays})`,
+        )
+      : ["- None"]),
     "",
-    "## Task Snapshot",
-    ...plan.rows.map((row) => {
-      const task = taskMap.get(row.taskId);
-      const prefix = `${"  ".repeat(row.depth)}-`;
-      return `${prefix} ${task?.name} | planned ${task?.computedPlannedStart ?? "TBD"} -> ${task?.computedPlannedEnd ?? "TBD"} | actual ${task?.computedActualStart ?? "TBD"} -> ${task?.computedActualEnd ?? "TBD"} | status ${task?.rolledUpStatus}`;
-    }),
-  ].join("\n");
+    "## Task Hierarchy",
+  ];
+
+  for (const row of plan.rows) {
+    const task = taskMap.get(row.taskId);
+
+    if (!task) {
+      continue;
+    }
+
+    const prefix = `${"  ".repeat(row.depth)}-`;
+    const current = exportTaskCurrentDates(task);
+    const dependencyCounts = `${task.blockedBy.length} blocked by / ${task.blocking.length} blocking`;
+
+    lines.push(
+      `${prefix} ${task.name} | type ${exportTaskType(task)} | status ${exportTaskStatus(task)} | progress ${exportTaskProgress(task)}% | current ${exportDate(current.start)} -> ${exportDate(current.end)} (${current.mode}) | forecast ${exportDate(task.computedPlannedStart)} -> ${exportDate(task.computedPlannedEnd)} | baseline ${exportDate(task.computedBaselinePlannedStart)} -> ${exportDate(task.computedBaselinePlannedEnd)} | actual ${exportDate(task.computedActualStart)} -> ${exportDate(task.computedActualEnd)} | variance vs baseline ${exportBaselineVariance(task)} | dependencies ${dependencyCounts}`,
+    );
+
+    if (task.issues.length > 0) {
+      lines.push(`${"  ".repeat(row.depth + 1)}- issues: ${task.issues.map((issue) => issue.message).join("; ")}`);
+    }
+
+    if (task.checkpoints.length > 0) {
+      for (const checkpoint of task.checkpoints) {
+        lines.push(
+          `${"  ".repeat(row.depth + 1)}- checkpoint ${checkpoint.name} | progress ${checkpoint.percentComplete}% | weight ${checkpoint.weightPoints}`,
+        );
+      }
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export async function listProjects() {
@@ -1392,16 +1517,25 @@ export async function exportProject(projectId: string): Promise<ProjectExport | 
     return null;
   }
 
+  const generatedAt = now();
+
   return {
     json: {
+      exportVersion: 2,
+      generatedAt,
       project: plan.project,
       timeline: {
         start: plan.timelineStart,
         end: plan.timelineEnd,
       },
+      projectPercentComplete: plan.projectPercentComplete,
       issues: plan.issues,
       tasks: plan.tasks,
       dependencies: plan.dependencies,
+      rows: plan.rows,
+      blockedTaskIds: plan.blockedTaskIds,
+      upcomingTaskIds: plan.upcomingTaskIds,
+      pendingUndoActions: plan.pendingUndoActions,
     },
     markdown: exportMarkdown(plan),
   };

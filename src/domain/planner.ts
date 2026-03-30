@@ -244,11 +244,18 @@ export type ProjectPlan = {
 
 export type ProjectExport = {
   json: {
+    exportVersion: number;
+    generatedAt: string;
     project: Project;
     timeline: { start: string | null; end: string | null };
+    projectPercentComplete: number;
     issues: PlanningIssue[];
     tasks: PlannedTask[];
     dependencies: Dependency[];
+    rows: PlannerRow[];
+    blockedTaskIds: string[];
+    upcomingTaskIds: string[];
+    pendingUndoActions: PendingUndoAction[];
   };
   markdown: string;
 };
