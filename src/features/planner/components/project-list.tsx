@@ -169,11 +169,11 @@ export function ProjectList({ initialProjects }: Props) {
 
   return (
     <>
-      <div className="flex min-h-screen bg-background">
+      <div className="flex h-screen overflow-hidden bg-background">
         <WorkspaceSidebar projects={projects} />
 
-        <main className="flex min-h-screen flex-1 flex-col overflow-hidden">
-          <header className="border-b border-border/70 bg-background/95 px-8 py-6 backdrop-blur">
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <header className="shrink-0 border-b border-border/70 bg-background/95 px-8 py-6 backdrop-blur">
             <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
               <div>
                 <h1 className="text-3xl font-semibold tracking-tight">Projects</h1>
@@ -201,7 +201,7 @@ export function ProjectList({ initialProjects }: Props) {
             </div>
           </header>
 
-          <section className="flex-1 overflow-y-auto px-8 py-8">
+          <section className="min-h-0 flex-1 overflow-y-auto px-8 py-8">
             <div className="overflow-hidden rounded-3xl border border-border/70 bg-card shadow-sm">
               <div className="grid grid-cols-[minmax(260px,1.2fr)_minmax(280px,1fr)_160px] border-b border-border/70 bg-muted/35 px-5 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 <span>Project</span>

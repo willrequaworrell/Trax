@@ -44,9 +44,9 @@ export default async function ProjectPage({ params }: Props) {
 
   if (corruptionError) {
     return (
-      <div className="flex min-h-screen bg-background">
+      <div className="flex h-screen overflow-hidden bg-background">
         <WorkspaceSidebar projects={projects} activeProjectId={projectId} />
-        <main className="flex min-h-screen flex-1 items-center justify-center overflow-hidden px-6 py-10">
+        <main className="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-6 py-10">
           <section className="w-full max-w-3xl rounded-3xl border border-destructive/25 bg-card/95 p-8 shadow-sm">
             <div className="flex items-start gap-4">
               <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">

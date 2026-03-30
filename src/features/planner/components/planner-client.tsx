@@ -3,13 +3,14 @@
 import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import {
+  ArrowBendDownRight,
+  ArrowBendUpLeft,
   ArrowsInLineHorizontal,
   ArrowsOutLineVertical,
   CaretDown,
   CaretRight,
   Check,
   DownloadSimple,
-  GitBranch,
   MagnifyingGlass,
   Minus,
   PencilSimple,
@@ -44,10 +45,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRoot,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -86,12 +85,14 @@ class RequestError extends Error {
   }
 }
 
-const LIST_GRID_CLASS = "grid-cols-[minmax(240px,1.55fr)_136px_160px_150px_150px_minmax(140px,1fr)_56px]";
+const LIST_GRID_CLASS = "grid-cols-[minmax(240px,1.55fr)_152px_160px_150px_150px_minmax(140px,1fr)_56px]";
 const GANTT_NAME_COLUMN_WIDTH = 320;
 const GANTT_DEFAULT_COLUMN_WIDTH = 48;
 const GANTT_MAX_COLUMN_WIDTH = 96;
 const GANTT_ZOOM_STEP = 12;
 const LIST_DEPTH_INDENT = 18;
+const LIST_TREE_CONTROL_SIZE = 28;
+const LIST_TREE_CONTROL_GAP = 8;
 const EXPANDED_STATE_STORAGE_PREFIX = "traxly:planner:expanded";
 const ROOT_DEPTH_STYLE = {
   rowTintClass: "bg-background",
@@ -156,6 +157,14 @@ function statusVariant(status: PlannedTask["rolledUpStatus"]) {
 
 function statusLabel(status: PlannedTask["rolledUpStatus"]) {
   return status.replaceAll("_", " ");
+}
+
+function renderStatusBadge(status: PlannedTask["rolledUpStatus"]) {
+  return (
+    <Badge className="inline-flex w-[128px] justify-center" variant={statusVariant(status)}>
+      {statusLabel(status)}
+    </Badge>
+  );
 }
 
 function formatShortDate(value: string | null) {
@@ -273,15 +282,20 @@ function taskBarStyle(task: PlannedTask, timeline: string[]) {
 
 function barStyleForRange(start: string | null, end: string | null, timeline: string[]) {
   if (!start || !end || timeline.length === 0) {
-    return { left: "0%", width: "0%" };
+    return { left: "0%", width: "0%", leftPercent: 0, widthPercent: 0 };
   }
 
   const startIndex = Math.max(0, timeline.indexOf(start));
   const endIndex = Math.max(startIndex, timeline.indexOf(end));
-  const left = (startIndex / Math.max(timeline.length, 1)) * 100;
-  const width = ((endIndex - startIndex + 1) / Math.max(timeline.length, 1)) * 100;
+  const leftPercent = (startIndex / Math.max(timeline.length, 1)) * 100;
+  const widthPercent = ((endIndex - startIndex + 1) / Math.max(timeline.length, 1)) * 100;
 
-  return { left: `${left}%`, width: `${Math.max(width, 4)}%` };
+  return {
+    left: `${leftPercent}%`,
+    width: `${Math.max(widthPercent, 4)}%`,
+    leftPercent,
+    widthPercent: Math.max(widthPercent, 4),
+  };
 }
 
 function signedBusinessDayGap(from: string, to: string) {
@@ -408,7 +422,7 @@ function depthTintClass(depth: number, variant: "task" | "checkpoint") {
 function ganttBarTone(task: PlannedTask) {
   if (task.isSummary) {
     return {
-      shellClass: "bg-black/18 border-black/12",
+      shellClass: "bg-black/14 border-black/16",
       fillClass: "bg-black/72",
       textClass: "text-black/82",
     };
@@ -416,17 +430,30 @@ function ganttBarTone(task: PlannedTask) {
 
   if (task.type === "milestone") {
     return {
-      shellClass: "bg-black/24 border-black/14",
+      shellClass: "bg-black/18 border-black/18",
       fillClass: "bg-black/88",
       textClass: "text-white",
     };
   }
 
   return {
-    shellClass: "bg-black/14 border-black/10",
+    shellClass: "bg-black/10 border-black/14",
     fillClass: "bg-black/68",
     textClass: "text-black/78",
   };
+}
+
+function ganttProgressFillStyle(barStyle: ReturnType<typeof barStyleForRange>, percent: number) {
+  const clampedPercent = Math.max(0, Math.min(100, percent));
+
+  return {
+    left: `${barStyle.leftPercent}%`,
+    width: `${(barStyle.widthPercent * clampedPercent) / 100}%`,
+  };
+}
+
+function ganttInnerFillWidth(percent: number) {
+  return { width: `${Math.max(0, Math.min(100, percent))}%` };
 }
 
 function ProgressPill({ value, compact = false }: { value: number; compact?: boolean }) {
@@ -500,6 +527,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [checkpointDrafts, setCheckpointDrafts] = useState<Record<string, CheckpointDraft>>({});
   const [pendingTaskIds, setPendingTaskIds] = useState<Record<string, boolean>>({});
   const [pendingCheckpointIds, setPendingCheckpointIds] = useState<Record<string, boolean>>({});
+  const [hoveredDependencyTaskId, setHoveredDependencyTaskId] = useState<string | null>(null);
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
   const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
   const [baselineGateOpen, setBaselineGateOpen] = useState(false);
@@ -519,6 +547,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [isPending, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
   const undoToastIdsRef = useRef<Set<string>>(new Set());
+  const dependencyHoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const baselineGateActionRef = useRef<(() => Promise<void>) | null>(null);
   const actualStartGateActionRef = useRef<((actualStart: string) => Promise<void>) | null>(null);
   const actualEndGateActionRef = useRef<((actualEnd: string) => Promise<void>) | null>(null);
@@ -532,6 +561,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     [plan.tasks],
   );
   const leafTasks = useMemo(() => plan.tasks.filter((task) => !task.isSummary), [plan.tasks]);
+
+  useEffect(() => {
+    return () => {
+      if (dependencyHoverTimeoutRef.current !== null) {
+        clearTimeout(dependencyHoverTimeoutRef.current);
+      }
+    };
+  }, []);
   const earliestForecastStart = useMemo(
     () =>
       leafTasks
@@ -1236,6 +1273,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     return { percentComplete };
   }
 
+  function buildProgressResetPatch() {
+    return {
+      actualStart: null,
+      actualEnd: null,
+      percentComplete: 0,
+    };
+  }
+
   function renderListDateValue(task: PlannedTask, field: "start" | "due") {
     const actualValue = field === "start" ? actualDisplayStart(task) : actualDisplayEnd(task);
     const forecastValue =
@@ -1377,84 +1422,67 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     }
   }
 
-  async function toggleDependency(task: PlannedTask, predecessorTaskId: string, checked: boolean) {
-    markTaskPending(task.id, true);
-
-    try {
-      const existing = task.blockedBy.find((dependency) => dependency.predecessorTaskId === predecessorTaskId);
-      const nextPlan = checked
-        ? await requestPlan(`/api/projects/${plan.project.id}/dependencies`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              predecessorTaskId,
-              successorTaskId: task.id,
-              type: existing?.type ?? "FS",
-              lagDays: existing?.lagDays ?? 0,
-            }),
-          })
-        : existing
-          ? await requestPlan(`/api/dependencies/${existing.id}`, { method: "DELETE" })
-          : null;
-
-      if (nextPlan) {
-        applyPlan(nextPlan);
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update dependencies.");
-    } finally {
-      markTaskPending(task.id, false);
-    }
-  }
-
   function dependencyPills(task: PlannedTask) {
-    if (task.blockedBy.length === 0) {
+    const blockedByCount = task.blockedBy.length;
+    const blockingCount = task.blocking.length;
+
+    if (blockedByCount === 0 && blockingCount === 0) {
       return <span className="text-xs text-muted-foreground">None</span>;
     }
 
-    const displayed = task.blockedBy.slice(0, 2);
-    const overflow = task.blockedBy.length - displayed.length;
-
     return (
-      <div className="flex flex-wrap gap-1.5">
-        {displayed.map((dependency) => {
-          const predecessor = taskMap.get(dependency.predecessorTaskId);
-
-          return (
-            <TooltipProvider key={dependency.id}>
-              <TooltipRoot>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex max-w-32 items-center gap-1 rounded-full border border-border/70 bg-background px-2 py-1 text-xs text-muted-foreground">
-                    <GitBranch className="size-3" />
-                    <span className="truncate">{predecessor?.name ?? dependency.predecessorTaskId}</span>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {dependency.type} from {predecessor?.name ?? dependency.predecessorTaskId} with lag {dependency.lagDays}
-                </TooltipContent>
-              </TooltipRoot>
-            </TooltipProvider>
-          );
-        })}
-        {overflow > 0 ? <Badge variant="outline">+{overflow}</Badge> : null}
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        {blockedByCount > 0 ? (
+          <span className="inline-flex items-center gap-1">
+            <ArrowBendUpLeft className="size-3" />
+            <span>{blockedByCount}</span>
+          </span>
+        ) : null}
+        {blockedByCount > 0 && blockingCount > 0 ? <span className="h-3 w-px bg-border/70" /> : null}
+        {blockingCount > 0 ? (
+          <span className="inline-flex items-center gap-1">
+            <ArrowBendDownRight className="size-3" />
+            <span>{blockingCount}</span>
+          </span>
+        ) : null}
       </div>
     );
+  }
+
+  function openDependencyPopover(taskId: string) {
+    if (dependencyHoverTimeoutRef.current !== null) {
+      clearTimeout(dependencyHoverTimeoutRef.current);
+      dependencyHoverTimeoutRef.current = null;
+    }
+
+    setHoveredDependencyTaskId(taskId);
+  }
+
+  function closeDependencyPopover(taskId: string) {
+    if (dependencyHoverTimeoutRef.current !== null) {
+      clearTimeout(dependencyHoverTimeoutRef.current);
+    }
+
+    dependencyHoverTimeoutRef.current = setTimeout(() => {
+      setHoveredDependencyTaskId((current) => (current === taskId ? null : current));
+      dependencyHoverTimeoutRef.current = null;
+    }, 120);
   }
 
   function renderLeafControls(task: PlannedTask) {
     const currentProgress = Number(progressDrafts[task.id] ?? task.percentComplete);
     const isPending = Boolean(pendingTaskIds[task.id]);
+    const canReset =
+      currentProgress > 0 ||
+      task.percentComplete > 0 ||
+      Boolean(task.actualStart) ||
+      Boolean(task.actualEnd);
     const progressChanged = currentProgress !== task.percentComplete;
     const progressActive = isCellActive(task.id, "progress");
-    const dependenciesActive = isCellActive(task.id, "dependencies");
 
     return (
       <>
-        <div>
-          <div className="px-2 py-1">
-            <Badge variant={statusVariant(task.rolledUpStatus)}>{statusLabel(task.rolledUpStatus)}</Badge>
-          </div>
-        </div>
+        <div className="flex items-center">{renderStatusBadge(task.rolledUpStatus)}</div>
 
         <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
           {task.isProgressDerived ? (
@@ -1490,40 +1518,23 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                     <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Progress</span>
                     <span className="text-sm font-medium">{currentProgress}%</span>
                   </div>
-                  <SliderRoot
-                    value={[currentProgress]}
-                    min={0}
-                    max={100}
-                    step={5}
-                    onValueChange={(value) => setProgressDrafts((current) => ({ ...current, [task.id]: String(value[0] ?? 0) }))}
-                    disabled={isPending}
-                  >
-                    <SliderTrack>
-                      <SliderRange />
-                    </SliderTrack>
-                    <SliderThumb />
-                  </SliderRoot>
-                  <div className="flex items-center justify-between gap-2">
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      onClick={() => {
-                        setProgressDrafts((current) => ({ ...current, [task.id]: "100" }));
-                        void patchTask(task, buildProgressPatch(task, 100), undefined, {
-                          onSuccess: () => {
-                            setActiveCell(null);
-                            setProgressDrafts((current) => {
-                              const next = { ...current };
-                              delete next[task.id];
-                              return next;
-                            });
-                          },
-                        });
-                      }}
-                      disabled={isPending || currentProgress >= 100}
+                  <div className="flex items-center gap-3">
+                    <SliderRoot
+                      value={[currentProgress]}
+                      min={0}
+                      max={100}
+                      step={5}
+                      className="flex-1"
+                      onValueChange={(value) =>
+                        setProgressDrafts((current) => ({ ...current, [task.id]: String(value[0] ?? 0) }))
+                      }
+                      disabled={isPending}
                     >
-                      Mark complete
-                    </Button>
+                      <SliderTrack>
+                        <SliderRange />
+                      </SliderTrack>
+                      <SliderThumb />
+                    </SliderRoot>
                     <Button
                       size="icon-xs"
                       onClick={() => {
@@ -1545,6 +1556,48 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                       <span className="sr-only">Save progress</span>
                     </Button>
                   </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => {
+                        setProgressDrafts((current) => ({ ...current, [task.id]: "0" }));
+                        void patchTask(task, buildProgressResetPatch(), undefined, {
+                          onSuccess: () => {
+                            setActiveCell(null);
+                            setProgressDrafts((current) => {
+                              const next = { ...current };
+                              delete next[task.id];
+                              return next;
+                            });
+                          },
+                        });
+                      }}
+                      disabled={isPending || !canReset}
+                    >
+                      Reset
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="default"
+                      onClick={() => {
+                        setProgressDrafts((current) => ({ ...current, [task.id]: "100" }));
+                        void patchTask(task, buildProgressPatch(task, 100), undefined, {
+                          onSuccess: () => {
+                            setActiveCell(null);
+                            setProgressDrafts((current) => {
+                              const next = { ...current };
+                              delete next[task.id];
+                              return next;
+                            });
+                          },
+                        });
+                      }}
+                      disabled={isPending || currentProgress >= 100}
+                    >
+                      Mark complete
+                    </Button>
+                  </div>
                 </div>
               </PopoverContent>
             </PopoverRoot>
@@ -1556,49 +1609,114 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         <div>{renderListDateValue(task, "due")}</div>
 
         <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
-          <DropdownMenuRoot
-            open={dependenciesActive}
-            onOpenChange={(open) => setActiveCell(open ? { taskId: task.id, field: "dependencies" } : null)}
+          <PopoverRoot
+            open={hoveredDependencyTaskId === task.id}
+            onOpenChange={(open) => {
+              if (!open) {
+                setHoveredDependencyTaskId((current) => (current === task.id ? null : current));
+              }
+            }}
           >
-            <DropdownMenuTrigger asChild>
-              <button
-                className={cellButtonClass(task.id, "dependencies")}
-                onClick={() => setActiveCell({ taskId: task.id, field: "dependencies" })}
-                disabled={isPending}
+            <PopoverTrigger asChild>
+              <div
+                className={cn(cellButtonClass(task.id, "dependencies"), "cursor-default")}
+                onMouseEnter={() => openDependencyPopover(task.id)}
+                onMouseLeave={() => closeDependencyPopover(task.id)}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 flex-1">{dependencyPills(task)}</div>
-                  <span className="shrink-0 text-xs text-muted-foreground opacity-0 transition group-hover:opacity-100">
-                    {isPending ? "Saving…" : "Edit"}
-                  </span>
+                <div className="min-w-0">{dependencyPills(task)}</div>
+              </div>
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              className="max-h-80 w-72 overflow-y-auto rounded-2xl p-0"
+              onOpenAutoFocus={(event) => event.preventDefault()}
+              onMouseEnter={() => openDependencyPopover(task.id)}
+              onMouseLeave={() => closeDependencyPopover(task.id)}
+            >
+              <div className="border-b border-border/70 px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Dependencies
+              </div>
+              <div className="space-y-3 px-3 py-3">
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Blocked by</p>
+                  {task.blockedBy.length > 0 ? (
+                    task.blockedBy.map((dependency) => {
+                      const predecessor = taskMap.get(dependency.predecessorTaskId);
+
+                      return (
+                        <button
+                          key={dependency.id}
+                          className="block w-full cursor-pointer rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-left transition hover:bg-muted/35"
+                          onClick={() => {
+                            if (predecessor) {
+                              setHoveredDependencyTaskId(null);
+                              openEditDialog(predecessor.id);
+                            }
+                          }}
+                          disabled={!predecessor}
+                        >
+                          <p className="truncate text-sm font-medium text-foreground">
+                            {predecessor?.name ?? dependency.predecessorTaskId}
+                          </p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {(predecessor?.computedPlannedStart ?? predecessor?.plannedStart ?? "No start").toString()} →{" "}
+                            {(predecessor?.computedPlannedEnd ?? predecessor?.plannedEnd ?? "No end").toString()}
+                          </p>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="text-sm text-muted-foreground">No incoming dependencies.</div>
+                  )}
                 </div>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="max-h-80 w-72 overflow-y-auto">
-              <DropdownMenuLabel>Blocked by</DropdownMenuLabel>
-              {leafTasks
-                .filter((candidate) => candidate.id !== task.id)
-                .map((candidate) => {
-                  const checked = task.blockedBy.some((dependency) => dependency.predecessorTaskId === candidate.id);
-                  return (
-                    <DropdownMenuCheckboxItem
-                      key={candidate.id}
-                      checked={checked}
-                      onCheckedChange={(nextChecked) => void toggleDependency(task, candidate.id, Boolean(nextChecked))}
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate">{candidate.name}</p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {candidate.computedPlannedStart ?? "No start"} → {candidate.computedPlannedEnd ?? "No due"}
-                        </p>
-                      </div>
-                    </DropdownMenuCheckboxItem>
-                  );
-                })}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => openEditDialog(task.id)}>Open full dependency editor</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenuRoot>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Blocking</p>
+                  {task.blocking.length > 0 ? (
+                    task.blocking.map((dependency) => {
+                      const successor = taskMap.get(dependency.successorTaskId);
+
+                      return (
+                        <button
+                          key={dependency.id}
+                          className="block w-full cursor-pointer rounded-xl border border-border/60 bg-muted/20 px-3 py-2 text-left transition hover:bg-muted/35"
+                          onClick={() => {
+                            if (successor) {
+                              setHoveredDependencyTaskId(null);
+                              openEditDialog(successor.id);
+                            }
+                          }}
+                          disabled={!successor}
+                        >
+                          <p className="truncate text-sm font-medium text-foreground">
+                            {successor?.name ?? dependency.successorTaskId}
+                          </p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {(successor?.computedPlannedStart ?? successor?.plannedStart ?? "No start").toString()} →{" "}
+                            {(successor?.computedPlannedEnd ?? successor?.plannedEnd ?? "No end").toString()}
+                          </p>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="text-sm text-muted-foreground">Not blocking any other tasks.</div>
+                  )}
+                </div>
+              </div>
+              <div className="border-t border-border/70 p-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setActiveCell(null);
+                    openEditDialog(task.id);
+                  }}
+                >
+                  Open full dependency editor
+                </Button>
+              </div>
+            </PopoverContent>
+          </PopoverRoot>
         </div>
       </>
     );
@@ -1607,9 +1725,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   function renderSummaryCells(task: PlannedTask) {
     return (
       <>
-        <div>
-          <Badge variant={statusVariant(task.rolledUpStatus)}>{statusLabel(task.rolledUpStatus)}</Badge>
-        </div>
+        <div className="flex items-center">{renderStatusBadge(task.rolledUpStatus)}</div>
         <div>
           <ProgressPill value={task.rolledUpPercentComplete} />
         </div>
@@ -1949,10 +2065,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         )}
         onClick={isSummaryRow ? () => void toggleTask(task.id) : undefined}
       >
-        <div className="relative flex min-w-0 items-center gap-2" style={{ paddingLeft: `${depth * LIST_DEPTH_INDENT}px` }}>
+        <div
+          className="relative min-w-0"
+          style={{ paddingLeft: `${depth * LIST_DEPTH_INDENT + LIST_TREE_CONTROL_SIZE + LIST_TREE_CONTROL_GAP}px` }}
+        >
           {hasExpandableContent ? (
-              <button
-              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
+            <button
+              className="absolute left-0 top-1/2 inline-flex size-7 -translate-y-1/2 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
+              style={{ left: `${depth * LIST_DEPTH_INDENT}px` }}
               onClick={(event) => {
                 event.stopPropagation();
                 void toggleTask(task.id);
@@ -1961,7 +2081,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               {expanded ? <CaretDown className="size-4" /> : <CaretRight className="size-4" />}
             </button>
           ) : (
-            <span aria-hidden className="inline-flex size-7 items-center justify-center" />
+            <span
+              aria-hidden
+              className="absolute left-0 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center"
+              style={{ left: `${depth * LIST_DEPTH_INDENT}px` }}
+            />
           )}
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -2073,6 +2197,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       timeline,
     );
     const percent = progressPercent(task);
+    const forecastFillStyle = ganttInnerFillWidth(percent);
+    const inProgressFillStyle = ganttProgressFillStyle(forecastStyle, percent);
     const barTone = ganttBarTone(task);
     const showCompletedActual = Boolean(actualStart && actualEnd);
     const showInProgressActual = Boolean(actualStart && !actualEnd);
@@ -2136,53 +2262,113 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               ))}
             </div>
             {task.computedBaselinePlannedStart && task.computedBaselinePlannedEnd ? (
-              <div
-                className="absolute top-4 h-8 rounded-2xl border border-black/10 bg-black/8"
-                style={baselineStyle}
-              />
+              <TooltipProvider>
+                <TooltipRoot>
+                  <TooltipTrigger asChild>
+                    <div
+                      className="absolute top-4 h-8 rounded-xl border border-dashed border-black/30 bg-transparent"
+                      style={baselineStyle}
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
+                    <div className="space-y-1 text-xs">
+                      <p className="font-medium text-white">Baseline</p>
+                      <p className="text-white/80">
+                        {formatShortDate(task.computedBaselinePlannedStart)} → {formatShortDate(task.computedBaselinePlannedEnd)}
+                      </p>
+                    </div>
+                  </TooltipContent>
+                </TooltipRoot>
+              </TooltipProvider>
             ) : null}
             {showForecastBar ? (
-              <div
-                className={cn(
-                  "absolute top-3 flex h-10 items-center overflow-hidden rounded-2xl border px-3 text-sm font-medium shadow-sm",
-                  barTone.shellClass,
-                  barTone.textClass,
-                )}
-                style={forecastStyle}
-              >
-                <div className="relative z-10 flex w-full items-center justify-end">
-                  <span className="text-xs font-semibold">{percent}%</span>
-                </div>
-              </div>
+              <TooltipProvider>
+                <TooltipRoot>
+                  <TooltipTrigger asChild>
+                    <div
+                      className={cn(
+                        "absolute top-3 flex h-10 items-center overflow-hidden rounded-xl border px-3 text-sm font-medium shadow-sm",
+                        barTone.shellClass,
+                        barTone.textClass,
+                      )}
+                      style={forecastStyle}
+                      >
+                      <div
+                        className={cn("absolute inset-y-0 left-0 rounded-xl", barTone.fillClass)}
+                        style={forecastFillStyle}
+                      />
+                      <div className="relative z-10 flex w-full items-center justify-end">
+                        <span className="text-xs font-semibold">{percent}%</span>
+                      </div>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
+                    <div className="space-y-1 text-xs">
+                      <p className="font-medium text-white">Forecast</p>
+                      <p className="text-white/80">
+                        {formatShortDate(task.computedPlannedStart)} → {formatShortDate(task.computedPlannedEnd)}
+                      </p>
+                    </div>
+                  </TooltipContent>
+                </TooltipRoot>
+              </TooltipProvider>
             ) : null}
             {showInProgressActual ? (
-              <div
-                className={cn(
-                  "absolute top-3 h-10 rounded-2xl shadow-sm",
-                  barTone.fillClass,
-                )}
-                style={actualStyle}
-              />
+              <TooltipProvider>
+                <TooltipRoot>
+                  <TooltipTrigger asChild>
+                    <div
+                      className={cn(
+                        "absolute top-3 h-10 rounded-xl shadow-sm",
+                        barTone.fillClass,
+                      )}
+                      style={inProgressFillStyle}
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
+                    <div className="space-y-1 text-xs">
+                      <p className="font-medium text-white">Actual</p>
+                      <p className="text-white/80">Started {formatShortDate(actualStart)}</p>
+                      <p className="text-white/80">{percent}% complete</p>
+                    </div>
+                  </TooltipContent>
+                </TooltipRoot>
+              </TooltipProvider>
             ) : null}
             {showCompletedActual ? (
-              <div
-                className={cn(
-                  "absolute top-3 flex h-10 items-center overflow-hidden rounded-2xl border px-3 text-sm font-medium shadow-sm",
-                  barTone.shellClass,
-                  barTone.textClass,
-                )}
-                style={actualStyle}
-              >
-                <div
-                  className={cn(
-                    "absolute inset-0 rounded-2xl",
-                    barTone.fillClass,
-                  )}
-                />
-                <div className="relative z-10 flex w-full items-center justify-end">
-                  <span className="text-xs font-semibold">{percent}%</span>
-                </div>
-              </div>
+              <TooltipProvider>
+                <TooltipRoot>
+                  <TooltipTrigger asChild>
+                    <div
+                      className={cn(
+                        "absolute top-3 flex h-10 items-center overflow-hidden rounded-xl border px-3 text-sm font-medium shadow-sm",
+                        barTone.shellClass,
+                        barTone.textClass,
+                      )}
+                      style={actualStyle}
+                    >
+                      <div
+                        className={cn(
+                          "absolute inset-0 rounded-xl",
+                          barTone.fillClass,
+                        )}
+                      />
+                      <div className="relative z-10 flex w-full items-center justify-end">
+                        <span className="text-xs font-semibold">{percent}%</span>
+                      </div>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
+                    <div className="space-y-1 text-xs">
+                      <p className="font-medium text-white">Actual</p>
+                      <p className="text-white/80">
+                        {formatShortDate(actualStart)} → {formatShortDate(actualEnd)}
+                      </p>
+                      <p className="text-white/80">{percent}% complete</p>
+                    </div>
+                  </TooltipContent>
+                </TooltipRoot>
+              </TooltipProvider>
             ) : null}
           </div>
         </div>
@@ -2217,47 +2403,47 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   }
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex h-screen overflow-hidden bg-background">
       <WorkspaceSidebar projects={projects} activeProjectId={plan.project.id} />
 
-      <main className="flex min-h-screen flex-1 flex-col overflow-hidden">
-        <header className="border-b border-border/70 bg-background/95 px-8 pt-6 pb-4 backdrop-blur">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <header className="shrink-0 border-b border-border/70 bg-background/95 px-8 pt-6 pb-4 backdrop-blur">
           <div className="flex flex-col gap-5">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div>
                 <div className="flex items-center gap-3">
                   <h1 className="text-3xl font-semibold tracking-tight">{plan.project.name}</h1>
-                  <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
-                  {plan.project.baselineCapturedAt ? (
-                    <Badge variant="secondary">Baseline frozen {new Date(plan.project.baselineCapturedAt).toLocaleDateString()}</Badge>
-                  ) : null}
+                  <DropdownMenuRoot>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon-xs" aria-label="Project actions">
+                        •••
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem onClick={() => setRebaseOpen(true)}>Rebase schedule</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => void freezeBaseline()}>
+                        {plan.project.baselineCapturedAt ? "Reset baseline" : "Freeze baseline"}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setRenameOpen(true)}>
+                        <PencilSimple />
+                        Rename
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={() => void copyExport("markdown")}>
+                        <DownloadSimple />
+                        Copy Markdown export
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => void copyExport("json")}>
+                        <DownloadSimple />
+                        Copy JSON snapshot
+                      </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenuRoot>
                   {plan.issues.length > 0 ? <Badge variant="warning">{plan.issues.length} issues</Badge> : null}
                 </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <Button variant="outline" onClick={() => setRebaseOpen(true)}>
-                  Rebase schedule
-                </Button>
-                <Button variant="outline" onClick={() => void freezeBaseline()}>
-                  {plan.project.baselineCapturedAt ? "Reset baseline" : "Freeze baseline"}
-                </Button>
-                <Button variant="outline" onClick={() => setRenameOpen(true)}>
-                  <PencilSimple />
-                  Rename
-                </Button>
-                <DropdownMenuRoot>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline">
-                      <DownloadSimple />
-                      Export
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => void copyExport("markdown")}>Copy Markdown export</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => void copyExport("json")}>Copy JSON snapshot</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenuRoot>
+                <div className="mt-3 flex items-center gap-3">
+                  <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
+                </div>
               </div>
             </div>
 
@@ -2337,7 +2523,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
           </div>
         </header>
 
-        <section className="flex-1 overflow-auto px-8 py-6">
+        <section className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
           {view === "list" ? (
             <div className="overflow-hidden rounded-3xl border border-border/70 bg-card shadow-sm">
               <div className={cn("sticky top-0 z-10 grid border-b border-border/70 bg-background/95 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground backdrop-blur", LIST_GRID_CLASS)}>
