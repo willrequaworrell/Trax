@@ -43,6 +43,10 @@ export function shiftBusinessDays(iso: string, offset: number) {
   return formatIsoDate(cursor);
 }
 
+export function finishToStartSuccessorDate(finish: string, lagDays: number) {
+  return shiftBusinessDays(finish, lagDays + 1);
+}
+
 export function addDurationToStart(start: string, durationDays: number) {
   if (durationDays <= 1) {
     return start;

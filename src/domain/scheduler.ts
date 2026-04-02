@@ -3,6 +3,7 @@ import {
   businessDayShiftGap,
   businessDaysInclusive,
   clampToBusinessDay,
+  finishToStartSuccessorDate,
   isoToday,
   maxIsoDate,
   minIsoDate,
@@ -305,7 +306,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
         case "FS":
           requiredStart = maxIsoDate([
             requiredStart,
-            shiftBusinessDays(predecessor.computedPlannedEnd, dependency.lagDays),
+            finishToStartSuccessorDate(predecessor.computedPlannedEnd, dependency.lagDays),
           ])!;
           break;
         case "SS":

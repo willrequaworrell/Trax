@@ -489,7 +489,7 @@ test("actual completion reschedules downstream forecast from the actual finish",
   const storedB = await projectRepository.getTask(taskB!.taskId);
 
   assert.equal(storedA?.plannedStart, "2026-03-17");
-  assert.equal(storedB?.plannedStart, "2026-03-19");
+  assert.equal(storedB?.plannedStart, "2026-03-20");
 });
 
 test("preserves start/end scheduling on task creation", async () => {
@@ -1106,7 +1106,7 @@ test("deleting a dependency can be undone and restores successor scheduling", as
   const beforeDelete = withDependency?.tasks.find((task) => task.id === successor!.taskId);
   const dependencyId = withDependency?.dependencies.find((item) => item.successorTaskId === successor!.taskId)?.id;
 
-  assert.equal(beforeDelete?.computedPlannedStart, "2026-03-17");
+  assert.equal(beforeDelete?.computedPlannedStart, "2026-03-18");
   assert.ok(dependencyId);
 
   const deleted = await projectService.deleteDependency(dependencyId);
@@ -1115,7 +1115,7 @@ test("deleting a dependency can be undone and restores successor scheduling", as
 
   const restored = await projectService.undoPendingDeleteAction(deleted!.pendingUndoActions[0]!.id);
   const afterUndo = restored?.tasks.find((task) => task.id === successor!.taskId);
-  assert.equal(afterUndo?.computedPlannedStart, "2026-03-17");
+  assert.equal(afterUndo?.computedPlannedStart, "2026-03-18");
   assert.equal(restored?.dependencies.some((item) => item.id === dependencyId), true);
 });
 
@@ -1255,8 +1255,8 @@ test("editing a forecast task cascades downstream forecast dates", async () => {
   const storedB = await projectRepository.getTask(taskB!.taskId);
   const storedC = await projectRepository.getTask(taskC!.taskId);
 
-  assert.equal(storedB?.plannedStart, "2026-03-19");
-  assert.equal(storedC?.plannedStart, "2026-03-19");
+  assert.equal(storedB?.plannedStart, "2026-03-20");
+  assert.equal(storedC?.plannedStart, "2026-03-23");
 });
 
 test("freeze baseline copies the current forecast and can replace an existing baseline", async () => {

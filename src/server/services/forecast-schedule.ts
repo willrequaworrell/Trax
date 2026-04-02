@@ -3,6 +3,7 @@ import {
   businessDaysInclusive,
   clampToBusinessDay,
   compareIsoDates,
+  finishToStartSuccessorDate,
   maxIsoDate,
   shiftBusinessDays,
 } from "@/domain/date-utils";
@@ -312,7 +313,7 @@ export function cascadeForecastFromSeeds(
       switch (dependency.type) {
         case "FS":
           if (predecessorEnd) {
-            requiredStart = maxIsoDate([requiredStart, shiftBusinessDays(predecessorEnd, dependency.lagDays)]);
+            requiredStart = maxIsoDate([requiredStart, finishToStartSuccessorDate(predecessorEnd, dependency.lagDays)]);
           }
           break;
         case "SS":

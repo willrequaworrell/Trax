@@ -530,6 +530,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [hoveredDependencyTaskId, setHoveredDependencyTaskId] = useState<string | null>(null);
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
   const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
+  const [showBaselineBars, setShowBaselineBars] = useState(Boolean(initialPlan.project.baselineCapturedAt));
   const [baselineGateOpen, setBaselineGateOpen] = useState(false);
   const [baselineGatePending, setBaselineGatePending] = useState(false);
   const [baselineGateContent, setBaselineGateContent] = useState({
@@ -608,6 +609,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   useEffect(() => {
     setRebaseStartDate(earliestForecastStart);
   }, [earliestForecastStart, plan.project.id]);
+
+  useEffect(() => {
+    setShowBaselineBars(Boolean(plan.project.baselineCapturedAt));
+  }, [plan.project.baselineCapturedAt, plan.project.id]);
 
   useEffect(() => {
     const nextToastIds = new Set<string>();
@@ -848,6 +853,16 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
   function toggleTask(taskId: string) {
     setExpandedMap((current) => ({ ...current, [taskId]: !(current[taskId] ?? false) }));
+  }
+
+  function stopTogglePointerPropagation(event: React.PointerEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+  }
+
+  function handleToggleButtonClick(event: React.MouseEvent<HTMLButtonElement>, taskId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    void toggleTask(taskId);
   }
 
   async function renameProject(nextName: string) {
@@ -2091,12 +2106,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             <button
               type="button"
               aria-label={expanded ? `Collapse ${task.name}` : `Expand ${task.name}`}
-              className="absolute left-0 top-1/2 inline-flex size-7 -translate-y-1/2 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
+              className="absolute left-0 top-1/2 z-10 inline-flex size-7 -translate-y-1/2 cursor-pointer touch-manipulation select-none items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
               style={{ left: `${depth * LIST_DEPTH_INDENT}px` }}
-              onClick={(event) => {
-                event.stopPropagation();
-                void toggleTask(task.id);
-              }}
+              onPointerDown={stopTogglePointerPropagation}
+              onClick={(event) => handleToggleButtonClick(event, task.id)}
             >
               {expanded ? <CaretDown className="size-4" /> : <CaretRight className="size-4" />}
             </button>
@@ -2245,11 +2258,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               <button
                 type="button"
                 aria-label={expanded ? `Collapse ${task.name}` : `Expand ${task.name}`}
-                className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void toggleTask(task.id);
-                }}
+                className="relative z-10 inline-flex size-7 cursor-pointer touch-manipulation select-none items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
+                onPointerDown={stopTogglePointerPropagation}
+                onClick={(event) => handleToggleButtonClick(event, task.id)}
               >
                 {expanded ? <CaretDown className="size-4" /> : <CaretRight className="size-4" />}
               </button>
@@ -2284,7 +2295,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 <div key={date} className="border-r border-dashed border-border/60" />
               ))}
             </div>
-            {task.computedBaselinePlannedStart && task.computedBaselinePlannedEnd ? (
+            {showBaselineBars && task.computedBaselinePlannedStart && task.computedBaselinePlannedEnd ? (
               <TooltipProvider>
                 <TooltipRoot>
                   <TooltipTrigger asChild>
@@ -2470,8 +2481,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <NavigationMenuRoot>
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
+              <NavigationMenuRoot className="shrink-0">
                 <NavigationMenuList className="flex items-center gap-2 rounded-2xl border border-border/70 bg-muted/30 p-1">
                   <NavigationMenuItem>
                     <NavigationMenuTrigger active={view === "list"} onClick={() => setView("list")}>
@@ -2486,29 +2497,39 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </NavigationMenuList>
               </NavigationMenuRoot>
 
-              <div className="flex flex-col gap-3 xl:flex-row">
+              <div className="flex flex-col gap-3 xl:min-w-0 xl:flex-1 xl:flex-row xl:flex-wrap xl:items-center xl:justify-end">
                 {view === "gantt" ? (
-                  <div className="flex items-center gap-1 rounded-2xl border border-border/70 bg-background p-1 shadow-sm">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1 rounded-2xl border border-border/70 bg-background p-1 shadow-sm">
+                      <Button
+                        size="icon-xs"
+                        variant="ghost"
+                        onClick={() => setGanttColumnWidth((current) => Math.max(minGanttColumnWidth, current - GANTT_ZOOM_STEP))}
+                        disabled={!canZoomOut}
+                      >
+                        <Minus className="size-3.5" />
+                      </Button>
+                      <span className="px-2 text-xs font-medium text-muted-foreground">Zoom</span>
+                      <Button
+                        size="icon-xs"
+                        variant="ghost"
+                        onClick={() => setGanttColumnWidth((current) => Math.min(GANTT_MAX_COLUMN_WIDTH, current + GANTT_ZOOM_STEP))}
+                        disabled={!canZoomIn}
+                      >
+                        <Plus className="size-3.5" />
+                      </Button>
+                    </div>
                     <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      onClick={() => setGanttColumnWidth((current) => Math.max(minGanttColumnWidth, current - GANTT_ZOOM_STEP))}
-                      disabled={!canZoomOut}
+                      variant={showBaselineBars ? "default" : "outline"}
+                      aria-pressed={showBaselineBars}
+                      disabled={!plan.project.baselineCapturedAt}
+                      onClick={() => setShowBaselineBars((current) => !current)}
                     >
-                      <Minus className="size-3.5" />
-                    </Button>
-                    <span className="px-2 text-xs font-medium text-muted-foreground">Zoom</span>
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      onClick={() => setGanttColumnWidth((current) => Math.min(GANTT_MAX_COLUMN_WIDTH, current + GANTT_ZOOM_STEP))}
-                      disabled={!canZoomIn}
-                    >
-                      <Plus className="size-3.5" />
+                      Baseline
                     </Button>
                   </div>
                 ) : null}
-                <InputGroup className="w-full xl:w-[320px]">
+                <InputGroup className="w-full xl:min-w-[220px] xl:max-w-[320px] xl:flex-1">
                   <InputGroupAddon>
                     <MagnifyingGlass className="size-4" />
                   </InputGroupAddon>
@@ -2518,7 +2539,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                     placeholder="Search tasks"
                   />
                 </InputGroup>
-                <div className="flex items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
                   {hasTasks ? (
                     <>
                       <Button variant="outline" onClick={() => setAllExpanded(true)}>

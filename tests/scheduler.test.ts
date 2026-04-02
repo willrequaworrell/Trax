@@ -74,7 +74,7 @@ test("supports finish-to-start rescheduling", () => {
     });
 
     const taskB = plan.tasks.find((task) => task.id === "b");
-    assert.equal(taskB?.computedPlannedStart, "2026-03-18");
+    assert.equal(taskB?.computedPlannedStart, "2026-03-19");
   });
 
 test("supports start-to-start dependencies", () => {
@@ -104,7 +104,7 @@ test("supports lag offsets", () => {
     });
 
     const taskB = plan.tasks.find((task) => task.id === "b");
-    assert.equal(taskB?.computedPlannedStart, "2026-03-18");
+    assert.equal(taskB?.computedPlannedStart, "2026-03-19");
   });
 
 test("rolls up summary task spans and effort", () => {
@@ -345,7 +345,7 @@ test("sorts siblings by computed forecast start when stored starts are stale", (
   const free = plan.tasks.find((item) => item.id === "free");
 
   assert.equal(blocked?.plannedStart, "2026-03-16");
-  assert.equal(blocked?.computedPlannedStart, "2026-03-18");
+  assert.equal(blocked?.computedPlannedStart, "2026-03-19");
   assert.equal(free?.computedPlannedStart, "2026-03-17");
   assert.deepEqual(summary?.childIds, ["anchor", "free", "blocked"]);
 });
