@@ -2079,9 +2079,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
           "group relative grid items-center overflow-hidden border-b border-border/60 px-4 py-2 transition-colors",
           LIST_GRID_CLASS,
           depthTintClass(depth, "task"),
-          isSummaryRow ? "cursor-pointer" : "cursor-default",
+          hasExpandableContent ? "cursor-pointer" : "cursor-default",
         )}
-        onClick={isSummaryRow ? () => void toggleTask(task.id) : undefined}
+        onClick={hasExpandableContent ? () => void toggleTask(task.id) : undefined}
       >
         <div
           className="relative min-w-0"
@@ -2089,6 +2089,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         >
           {hasExpandableContent ? (
             <button
+              type="button"
+              aria-label={expanded ? `Collapse ${task.name}` : `Expand ${task.name}`}
               className="absolute left-0 top-1/2 inline-flex size-7 -translate-y-1/2 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
               style={{ left: `${depth * LIST_DEPTH_INDENT}px` }}
               onClick={(event) => {
@@ -2200,6 +2202,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     }
 
     const expanded = search.trim().length > 0 ? true : expandedMap[task.id] ?? false;
+    const hasExpandableContent = task.hasChildren || task.checkpoints.length > 0;
     const forecastStyle = taskBarStyle(task, timeline);
     const baselineStyle = barStyleForRange(
       task.computedBaselinePlannedStart,
@@ -2227,9 +2230,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         <div
           className={cn(
             "group flex min-w-max border-b border-border/60",
-            task.isSummary ? "cursor-pointer bg-muted/10 hover:bg-muted/20" : "hover:bg-muted/10",
+            hasExpandableContent ? "cursor-pointer bg-muted/10 hover:bg-muted/20" : "hover:bg-muted/10",
           )}
-          onClick={task.isSummary ? () => void toggleTask(task.id) : undefined}
+          onClick={hasExpandableContent ? () => void toggleTask(task.id) : undefined}
         >
           <div
             className={cn(
@@ -2238,8 +2241,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             )}
             style={{ width: GANTT_NAME_COLUMN_WIDTH, paddingLeft: `${depth * 18 + 16}px` }}
           >
-            {task.hasChildren ? (
+            {hasExpandableContent ? (
               <button
+                type="button"
+                aria-label={expanded ? `Collapse ${task.name}` : `Expand ${task.name}`}
                 className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted"
                 onClick={(event) => {
                   event.stopPropagation();

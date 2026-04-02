@@ -9,6 +9,8 @@
     "lint": "eslint",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:watch": "node --import tsx --test --watch tests/*.test.ts",
+    "template:cash-receipts": "node --import dotenv/config --import tsx scripts/seed-cash-receipts-template.ts",
+    "template:cash-receipts:actuals": "node --import dotenv/config --import tsx scripts/update-cash-receipts-actuals.ts",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config drizzle.config.ts"
   },
