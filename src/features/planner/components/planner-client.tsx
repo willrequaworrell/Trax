@@ -17,7 +17,7 @@ import {
   Plus,
   WarningCircle,
 } from "@phosphor-icons/react";
-import { format, parseISO } from "date-fns";
+import { format, isWeekend, parseISO } from "date-fns";
 
 import { computeCheckpointPercent } from "@/domain/checkpoints";
 import type { Checkpoint, PlannedTask, Project, ProjectPlan, TaskType } from "@/domain/planner";
@@ -90,6 +90,7 @@ const GANTT_NAME_COLUMN_WIDTH = 320;
 const GANTT_DEFAULT_COLUMN_WIDTH = 48;
 const GANTT_MAX_COLUMN_WIDTH = 96;
 const GANTT_ZOOM_STEP = 12;
+const GANTT_PERCENT_LABEL_MIN_WIDTH = 34;
 const LIST_DEPTH_INDENT = 18;
 const LIST_TREE_CONTROL_SIZE = 28;
 const LIST_TREE_CONTROL_GAP = 8;
@@ -292,9 +293,9 @@ function barStyleForRange(start: string | null, end: string | null, timeline: st
 
   return {
     left: `${leftPercent}%`,
-    width: `${Math.max(widthPercent, 4)}%`,
+    width: `${widthPercent}%`,
     leftPercent,
-    widthPercent: Math.max(widthPercent, 4),
+    widthPercent,
   };
 }
 
@@ -422,24 +423,24 @@ function depthTintClass(depth: number, variant: "task" | "checkpoint") {
 function ganttBarTone(task: PlannedTask) {
   if (task.isSummary) {
     return {
-      shellClass: "bg-black/14 border-black/16",
-      fillClass: "bg-black/72",
-      textClass: "text-black/82",
+      shellClass: "bg-black/28 border-black/24",
+      fillClass: "bg-black/78",
+      textClass: "text-white",
     };
   }
 
   if (task.type === "milestone") {
     return {
-      shellClass: "bg-black/18 border-black/18",
+      shellClass: "bg-black/32 border-black/26",
       fillClass: "bg-black/88",
       textClass: "text-white",
     };
   }
 
   return {
-    shellClass: "bg-black/10 border-black/14",
-    fillClass: "bg-black/68",
-    textClass: "text-black/78",
+    shellClass: "bg-black/24 border-black/22",
+    fillClass: "bg-black/78",
+    textClass: "text-white",
   };
 }
 
@@ -454,6 +455,10 @@ function ganttProgressFillStyle(barStyle: ReturnType<typeof barStyleForRange>, p
 
 function ganttInnerFillWidth(percent: number) {
   return { width: `${Math.max(0, Math.min(100, percent))}%` };
+}
+
+function ganttPercentLabelOutsideStyle(leftPercent: number) {
+  return { left: `${leftPercent}%` };
 }
 
 function ProgressPill({ value, compact = false }: { value: number; compact?: boolean }) {
@@ -2129,6 +2134,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 )}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (hasExpandableContent) {
+                    void toggleTask(task.id);
+                    return;
+                  }
+
                   openEditDialog(task.id);
                 }}
               >
@@ -2190,7 +2200,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               >
                 Add subsection
               </ContextMenuItem>
-              <ContextMenuItem onClick={() => openEditDialog(task.id)}>Edit section</ContextMenuItem>
+              <ContextMenuItem onClick={() => openEditDialog(task.id)}>Edit</ContextMenuItem>
             </ContextMenuContent>
           </ContextMenuRoot>
         ) : (
@@ -2237,19 +2247,26 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     const showCompletedActual = Boolean(actualStart && actualEnd);
     const showInProgressActual = Boolean(actualStart && !actualEnd);
     const showForecastBar = !showCompletedActual;
+    const forecastLabelIsNarrow =
+      (forecastStyle.widthPercent / 100) * ganttTimelineWidth < GANTT_PERCENT_LABEL_MIN_WIDTH;
+    const actualLabelIsNarrow =
+      (actualStyle.widthPercent / 100) * ganttTimelineWidth < GANTT_PERCENT_LABEL_MIN_WIDTH;
+    const inProgressWidthPercent = (forecastStyle.widthPercent * Math.max(0, Math.min(100, percent))) / 100;
+    const inProgressLabelIsNarrow =
+      (inProgressWidthPercent / 100) * ganttTimelineWidth < GANTT_PERCENT_LABEL_MIN_WIDTH;
 
     return (
       <CollapsibleRoot key={task.id} open={expanded}>
         <div
           className={cn(
-            "group flex min-w-max border-b border-border/60",
-            hasExpandableContent ? "cursor-pointer bg-muted/10 hover:bg-muted/20" : "hover:bg-muted/10",
+            "group flex min-w-max border-b border-slate-200",
+            hasExpandableContent ? "cursor-pointer bg-slate-50/80 hover:bg-slate-100/80" : "bg-white hover:bg-slate-50",
           )}
           onClick={hasExpandableContent ? () => void toggleTask(task.id) : undefined}
         >
           <div
             className={cn(
-              "sticky left-0 z-20 flex shrink-0 items-center gap-2 overflow-hidden border-r border-border/60 px-4 py-3 shadow-[8px_0_18px_-18px_rgba(15,23,42,0.35)]",
+              "sticky left-0 z-20 flex shrink-0 items-center gap-2 overflow-hidden border-r border-slate-200 px-4 py-3 shadow-[10px_0_22px_-20px_rgba(15,23,42,0.45)]",
               task.isSummary ? "bg-card" : "bg-card",
             )}
             style={{ width: GANTT_NAME_COLUMN_WIDTH, paddingLeft: `${depth * 18 + 16}px` }}
@@ -2273,8 +2290,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   "block w-full cursor-pointer truncate text-left font-medium transition hover:text-primary",
                   task.isSummary && "uppercase tracking-wide",
                 )}
+                title={task.name}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (hasExpandableContent) {
+                    void toggleTask(task.id);
+                    return;
+                  }
+
                   openEditDialog(task.id);
                 }}
               >
@@ -2286,21 +2309,33 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             </div>
           </div>
 
-          <div className="relative h-16 shrink-0 overflow-hidden" style={{ width: ganttTimelineWidth }}>
+          <div className="relative h-16 shrink-0 overflow-hidden bg-white" style={{ width: ganttTimelineWidth }}>
             <div
               className="grid h-full"
               style={{ gridTemplateColumns: `repeat(${Math.max(timeline.length, 1)}, ${ganttColumnWidth}px)` }}
             >
-              {(timeline.length > 0 ? timeline : ["timeline"]).map((date) => (
-                <div key={date} className="border-r border-dashed border-border/60" />
-              ))}
+              {(timeline.length > 0 ? timeline : ["timeline"]).map((date) => {
+                const parsedDate = timeline.length > 0 ? parseISO(date) : null;
+                const isMonday = parsedDate ? format(parsedDate, "i") === "1" : false;
+
+                return (
+                  <div
+                    key={date}
+                    className={cn(
+                      "border-r border-slate-200",
+                      parsedDate && isWeekend(parsedDate) && "bg-slate-50/80",
+                      isMonday && "border-r-slate-300",
+                    )}
+                  />
+                );
+              })}
             </div>
             {showBaselineBars && task.computedBaselinePlannedStart && task.computedBaselinePlannedEnd ? (
               <TooltipProvider>
                 <TooltipRoot>
                   <TooltipTrigger asChild>
                     <div
-                      className="absolute top-4 h-8 rounded-xl border border-dashed border-black/30 bg-transparent"
+                      className="absolute bottom-2 h-3 rounded-full border border-dashed border-black/35 bg-black/6"
                       style={baselineStyle}
                     />
                   </TooltipTrigger>
@@ -2321,19 +2356,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   <TooltipTrigger asChild>
                     <div
                       className={cn(
-                        "absolute top-3 flex h-10 items-center overflow-hidden rounded-xl border px-3 text-sm font-medium shadow-sm",
+                        "absolute top-2 flex h-9 items-center overflow-hidden rounded-lg border px-2 text-sm font-medium shadow-sm",
                         barTone.shellClass,
                         barTone.textClass,
                       )}
                       style={forecastStyle}
-                      >
+                    >
                       <div
-                        className={cn("absolute inset-y-0 left-0 rounded-xl", barTone.fillClass)}
+                        className={cn("absolute inset-y-0 left-0 rounded-lg", barTone.fillClass)}
                         style={forecastFillStyle}
                       />
-                      <div className="relative z-10 flex w-full items-center justify-end">
-                        <span className="text-xs font-semibold">{percent}%</span>
-                      </div>
+                      {!showInProgressActual && !forecastLabelIsNarrow ? (
+                        <div className="relative z-10 flex w-full items-center justify-end">
+                          <span className="text-xs font-semibold leading-none text-white drop-shadow-sm">{percent}%</span>
+                        </div>
+                      ) : null}
                     </div>
                   </TooltipTrigger>
                   <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
@@ -2347,17 +2384,29 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </TooltipRoot>
               </TooltipProvider>
             ) : null}
+            {showForecastBar && !showInProgressActual && forecastLabelIsNarrow ? (
+              <div
+                className="pointer-events-none absolute top-2 flex h-9 items-center pl-1 text-xs font-semibold leading-none text-slate-950"
+                style={ganttPercentLabelOutsideStyle(forecastStyle.leftPercent + forecastStyle.widthPercent)}
+              >
+                {percent}%
+              </div>
+            ) : null}
             {showInProgressActual ? (
               <TooltipProvider>
                 <TooltipRoot>
                   <TooltipTrigger asChild>
                     <div
                       className={cn(
-                        "absolute top-3 h-10 rounded-xl shadow-sm",
+                        "absolute top-2 flex h-9 items-center justify-end overflow-hidden rounded-lg px-2 shadow-sm",
                         barTone.fillClass,
                       )}
                       style={inProgressFillStyle}
-                    />
+                    >
+                      {!inProgressLabelIsNarrow ? (
+                        <span className="text-xs font-semibold leading-none text-white drop-shadow-sm">{percent}%</span>
+                      ) : null}
+                    </div>
                   </TooltipTrigger>
                   <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
                     <div className="space-y-1 text-xs">
@@ -2369,13 +2418,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </TooltipRoot>
               </TooltipProvider>
             ) : null}
+            {showInProgressActual && inProgressLabelIsNarrow ? (
+              <div
+                className="pointer-events-none absolute top-2 flex h-9 items-center pl-1 text-xs font-semibold leading-none text-slate-950"
+                style={ganttPercentLabelOutsideStyle(forecastStyle.leftPercent + inProgressWidthPercent)}
+              >
+                {percent}%
+              </div>
+            ) : null}
             {showCompletedActual ? (
               <TooltipProvider>
                 <TooltipRoot>
                   <TooltipTrigger asChild>
                     <div
                       className={cn(
-                        "absolute top-3 flex h-10 items-center overflow-hidden rounded-xl border px-3 text-sm font-medium shadow-sm",
+                        "absolute top-2 flex h-9 items-center overflow-hidden rounded-lg border px-2 text-sm font-medium shadow-sm",
                         barTone.shellClass,
                         barTone.textClass,
                       )}
@@ -2383,13 +2440,15 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                     >
                       <div
                         className={cn(
-                          "absolute inset-0 rounded-xl",
+                          "absolute inset-0 rounded-lg",
                           barTone.fillClass,
                         )}
                       />
-                      <div className="relative z-10 flex w-full items-center justify-end">
-                        <span className="text-xs font-semibold">{percent}%</span>
-                      </div>
+                      {!actualLabelIsNarrow ? (
+                        <div className="relative z-10 flex w-full items-center justify-end">
+                          <span className="text-xs font-semibold leading-none text-white drop-shadow-sm">{percent}%</span>
+                        </div>
+                      ) : null}
                     </div>
                   </TooltipTrigger>
                   <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">
@@ -2403,6 +2462,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   </TooltipContent>
                 </TooltipRoot>
               </TooltipProvider>
+            ) : null}
+            {showCompletedActual && actualLabelIsNarrow ? (
+              <div
+                className="pointer-events-none absolute top-2 flex h-9 items-center pl-1 text-xs font-semibold leading-none text-slate-950"
+                style={ganttPercentLabelOutsideStyle(actualStyle.leftPercent + actualStyle.widthPercent)}
+              >
+                {percent}%
+              </div>
             ) : null}
           </div>
         </div>
@@ -2481,9 +2548,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
-              <NavigationMenuRoot className="shrink-0">
-                <NavigationMenuList className="flex items-center gap-2 rounded-2xl border border-border/70 bg-muted/30 p-1">
+            <div className="flex flex-wrap items-center gap-3">
+              <NavigationMenuRoot className="w-fit shrink-0 grow-0">
+                <NavigationMenuList className="flex w-fit items-center gap-2 rounded-2xl border border-border/70 bg-muted/30 p-1">
                   <NavigationMenuItem>
                     <NavigationMenuTrigger active={view === "list"} onClick={() => setView("list")}>
                       List
@@ -2497,7 +2564,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </NavigationMenuList>
               </NavigationMenuRoot>
 
-              <div className="flex flex-col gap-3 xl:min-w-0 xl:flex-1 xl:flex-row xl:flex-wrap xl:items-center xl:justify-end">
+              <div className="flex min-w-[min(100%,_280px)] flex-1 flex-wrap items-center justify-end gap-3">
                 {view === "gantt" ? (
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <div className="flex items-center gap-1 rounded-2xl border border-border/70 bg-background p-1 shadow-sm">
@@ -2529,7 +2596,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                     </Button>
                   </div>
                 ) : null}
-                <InputGroup className="w-full xl:min-w-[220px] xl:max-w-[320px] xl:flex-1">
+                <InputGroup className="min-w-[220px] max-w-[320px] flex-[1_1_260px]">
                   <InputGroupAddon>
                     <MagnifyingGlass className="size-4" />
                   </InputGroupAddon>
@@ -2569,8 +2636,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
 
         <section className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
           {view === "list" ? (
-            <div className="overflow-hidden rounded-3xl border border-border/70 bg-card shadow-sm">
-              <div className={cn("sticky top-0 z-10 grid border-b border-border/70 bg-background/95 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground backdrop-blur", LIST_GRID_CLASS)}>
+            <div className="max-h-[calc(100vh-250px)] overflow-auto rounded-3xl border border-border/70 bg-card shadow-sm">
+              <div className={cn("sticky top-0 z-30 grid rounded-t-3xl border-b border-border/70 bg-background px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground shadow-sm", LIST_GRID_CLASS)}>
                 <span>Name</span>
                 <span>Status</span>
                 <span>Progress</span>
@@ -2604,25 +2671,25 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </div>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-3xl border border-border/70 bg-card shadow-sm">
+            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-card shadow-sm">
               <div ref={ganttViewportRef} className="max-h-[calc(100vh-250px)] overflow-auto">
                 <div className="min-w-max">
-                  <div className="sticky top-0 z-30 flex border-b border-border/70 bg-background/95 backdrop-blur">
+                  <div className="sticky top-0 z-30 flex border-b border-slate-200 bg-white/95 backdrop-blur">
                     <div
-                      className="sticky left-0 z-40 shrink-0 border-r border-border/70 bg-background/95 px-4 py-4 text-sm font-semibold"
+                      className="sticky left-0 z-40 shrink-0 border-r border-slate-200 bg-white/95 px-4 py-4 text-sm font-semibold"
                       style={{ width: GANTT_NAME_COLUMN_WIDTH }}
                     >
                       Name
                     </div>
                     <div className="shrink-0" style={{ width: ganttTimelineWidth }}>
                       <div
-                        className="grid border-b border-border/60 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+                        className="grid border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500"
                         style={{ gridTemplateColumns: `repeat(${Math.max(timeline.length, 1)}, ${ganttColumnWidth}px)` }}
                       >
                         {(monthSegments.length > 0 ? monthSegments : [{ label: "Timeline", span: 1 }]).map((segment) => (
                           <div
                             key={segment.label}
-                            className="border-r border-border/60 px-3 py-3 truncate"
+                            className="truncate border-r border-slate-200 px-3 py-3"
                             style={{ gridColumn: `span ${segment.span}` }}
                           >
                             {segment.label}
@@ -2630,18 +2697,27 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                         ))}
                       </div>
                       <div
-                        className="grid text-xs text-muted-foreground"
+                        className="grid bg-white text-xs text-slate-500"
                         style={{ gridTemplateColumns: `repeat(${Math.max(timeline.length, 1)}, ${ganttColumnWidth}px)` }}
                       >
                         {(timeline.length > 0 ? timeline : ["empty"]).map((date, index) => {
                           const showDay = shouldShowTimelineDayLabel(ganttColumnWidth, index);
                           const showWeekday = showDay && shouldShowTimelineWeekday(ganttColumnWidth);
+                          const parsedDate = timeline.length > 0 ? parseISO(date) : null;
+                          const isMonday = parsedDate ? format(parsedDate, "i") === "1" : false;
 
                           return (
-                            <div key={date} className="border-r border-border/60 px-2 py-2 text-center">
+                            <div
+                              key={date}
+                              className={cn(
+                                "border-r border-slate-200 px-2 py-2 text-center",
+                                parsedDate && isWeekend(parsedDate) && "bg-slate-50/80",
+                                isMonday && "border-r-slate-300",
+                              )}
+                            >
                               {timeline.length > 0 ? (
                                 <>
-                                  <p className="font-semibold text-foreground">{showDay ? format(parseISO(date), "d") : ""}</p>
+                                  <p className="font-semibold text-slate-950">{showDay ? format(parseISO(date), "d") : ""}</p>
                                   <p>{showWeekday ? format(parseISO(date), "EEEEE") : ""}</p>
                                 </>
                               ) : (

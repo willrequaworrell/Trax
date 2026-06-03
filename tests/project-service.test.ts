@@ -15,7 +15,7 @@ import { GET as getProjectsRoute } from "@/app/api/projects/route";
 import { PATCH as patchTaskRoute } from "@/app/api/tasks/[taskId]/route";
 import { POST as wrapTaskRoute } from "@/app/api/tasks/[taskId]/wrap/route";
 import { POST as undoRoute } from "@/app/api/undo/[undoId]/route";
-import type { Task } from "@/domain/planner";
+import type { Dependency, Task } from "@/domain/planner";
 
 process.env.NODE_ENV = "test";
 process.env.ALLOWED_EMAIL = "owner@example.com";
@@ -1287,6 +1287,50 @@ test("freeze baseline copies the current forecast and can replace an existing ba
   assert.equal(secondStored?.baselinePlannedDurationDays, 4);
 });
 
+test("freeze baseline snapshots dependency-adjusted forecast dates", async () => {
+  const plan = await makeProject("freeze-baseline-dependencies");
+  const predecessor = await projectService.createTask(plan.project.id, {
+    name: "A",
+    type: "task",
+    plannedStart: "2026-03-09",
+    plannedDurationDays: 1,
+  });
+  const successor = await projectService.createTask(plan.project.id, {
+    name: "B",
+    type: "task",
+    plannedStart: "2026-03-09",
+    plannedDurationDays: 1,
+  });
+
+  const snapshot = await projectRepository.getProjectSnapshot(plan.project.id);
+  assert.ok(snapshot);
+  const dependency: Dependency = {
+    id: "dep_stale_snapshot",
+    projectId: plan.project.id,
+    predecessorTaskId: predecessor!.taskId,
+    successorTaskId: successor!.taskId,
+    type: "FS",
+    lagDays: 0,
+    createdAt: "2026-03-18T00:00:00.000Z",
+    updatedAt: "2026-03-18T00:00:00.000Z",
+  };
+
+  await withMockedSnapshot(
+    plan.project.id,
+    {
+      ...snapshot,
+      dependencies: [dependency],
+    },
+    async () => {
+      await projectService.freezeProjectBaseline(plan.project.id);
+    },
+  );
+
+  const storedSuccessor = await projectRepository.getTask(successor!.taskId);
+  assert.equal(storedSuccessor?.baselinePlannedStart, "2026-03-10");
+  assert.equal(storedSuccessor?.baselinePlannedEnd, "2026-03-10");
+});
+
 test("rebase shifts forecast while preserving baseline and actuals", async () => {
   const plan = await makeProject("rebase-forecast");
   const created = await projectService.createTask(plan.project.id, {
@@ -1334,6 +1378,35 @@ test("duplicate with start date shifts forecast and resets actuals and baseline"
   assert.equal(duplicatedTask?.baselinePlannedStart, null);
   assert.equal(duplicatedTask?.actualStart, null);
   assert.equal(duplicatedTask?.percentComplete, 0);
+});
+
+test("duplicate normalizes copied forecast dependencies", async () => {
+  const plan = await makeProject("duplicate-normalizes-dependencies");
+  const predecessor = await projectService.createTask(plan.project.id, {
+    name: "A",
+    type: "task",
+    plannedStart: "2026-03-09",
+    plannedDurationDays: 1,
+  });
+  const successor = await projectService.createTask(plan.project.id, {
+    name: "B",
+    type: "task",
+    plannedStart: "2026-03-09",
+    plannedDurationDays: 1,
+  });
+
+  await projectService.createDependency(plan.project.id, {
+    predecessorTaskId: predecessor!.taskId,
+    successorTaskId: successor!.taskId,
+    type: "FS",
+    lagDays: 0,
+  });
+
+  const duplicated = await projectService.duplicateProject(plan.project.id, "Duplicated dependency plan");
+  const duplicatedSuccessor = duplicated?.tasks.find((task) => task.name === "B");
+
+  assert.equal(duplicatedSuccessor?.plannedStart, "2026-03-10");
+  assert.equal(duplicatedSuccessor?.computedPlannedStart, "2026-03-10");
 });
 
 test("rebase and freeze routes return updated plans", async () => {

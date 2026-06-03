@@ -409,13 +409,18 @@ export async function duplicateProject(projectId: string, name?: string, startDa
         tasks: rebaseForecastTasks(duplicatedSnapshot.tasks, startDate),
       }
     : duplicatedSnapshot;
+  const leafTaskIds = duplicated.tasks.filter((task) => task.type !== "summary").map((task) => task.id);
+  const normalizedDuplicated = {
+    ...duplicated,
+    tasks: cascadeForecastFromSeeds(duplicated, leafTaskIds, { includeSeeds: true }),
+  };
 
-  await projectRepository.insertProject(duplicated.project);
-  await projectRepository.insertTasks(duplicated.tasks);
-  await projectRepository.insertDependencies(duplicated.dependencies);
-  await projectRepository.insertCheckpoints(duplicated.checkpoints);
+  await projectRepository.insertProject(normalizedDuplicated.project);
+  await projectRepository.insertTasks(normalizedDuplicated.tasks);
+  await projectRepository.insertDependencies(normalizedDuplicated.dependencies);
+  await projectRepository.insertCheckpoints(normalizedDuplicated.checkpoints);
 
-  return getProjectPlan(duplicated.project.id);
+  return getProjectPlan(normalizedDuplicated.project.id);
 }
 
 export async function rebaseProjectForecast(projectId: string, startDate: string) {
@@ -438,16 +443,20 @@ export async function freezeProjectBaseline(projectId: string) {
   }
 
   const capturedAt = now();
+  const plan = computeProjectPlan(snapshot);
+  const plannedTaskById = new Map(plan.tasks.map((task) => [task.id, task]));
 
   for (const task of snapshot.tasks) {
     if (task.type === "summary") {
       continue;
     }
 
+    const plannedTask = plannedTaskById.get(task.id);
+
     await projectRepository.updateTask(task.id, {
-      baselinePlannedStart: task.plannedStart,
-      baselinePlannedEnd: task.plannedEnd,
-      baselinePlannedDurationDays: task.plannedDurationDays,
+      baselinePlannedStart: plannedTask?.computedPlannedStart ?? task.plannedStart,
+      baselinePlannedEnd: plannedTask?.computedPlannedEnd ?? task.plannedEnd,
+      baselinePlannedDurationDays: plannedTask?.computedPlannedDurationDays ?? task.plannedDurationDays,
       updatedAt: capturedAt,
     });
   }
