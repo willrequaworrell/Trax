@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { checkpoints, dependencies, pendingDeleteActions, projects, tasks } from "@/server/db/schema";
+import { checkpoints, dependencies, pendingDeleteActions, projects, projectShareLinks, tasks } from "@/server/db/schema";
 import { getDb } from "@/server/db/client";
 import { projectRepository } from "@/server/repositories/project-repository";
 import * as projectService from "@/server/services/project-service";
@@ -11,6 +11,8 @@ import { GET as exportProjectRoute } from "@/app/api/projects/[projectId]/export
 import { POST as freezeBaselineRoute } from "@/app/api/projects/[projectId]/freeze-baseline/route";
 import { POST as rebaseProjectRoute } from "@/app/api/projects/[projectId]/rebase/route";
 import { GET as getProjectRoute } from "@/app/api/projects/[projectId]/route";
+import { DELETE as revokeShareLinkRoute, GET as getShareLinkRoute, PATCH as patchShareLinkRoute, POST as createShareLinkRoute } from "@/app/api/projects/[projectId]/share/route";
+import { POST as regenerateShareLinkRoute } from "@/app/api/projects/[projectId]/share/regenerate/route";
 import { GET as getProjectsRoute } from "@/app/api/projects/route";
 import { PATCH as patchTaskRoute } from "@/app/api/tasks/[taskId]/route";
 import { POST as wrapTaskRoute } from "@/app/api/tasks/[taskId]/wrap/route";
@@ -51,6 +53,7 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name" | "projectId">)
 
 async function resetDatabase() {
   const db = await getDb();
+  await db.delete(projectShareLinks);
   await db.delete(pendingDeleteActions);
   await db.delete(checkpoints);
   await db.delete(dependencies);
@@ -88,6 +91,245 @@ test.beforeEach(async () => {
   process.env.TRAXLY_TEST_AUTH_EMAIL = "owner@example.com";
   projectService.__testUtils.setNowOverride(null);
   await resetDatabase();
+});
+
+test("creates project share links with hidden baseline variance by default and hashed tokens", async () => {
+  const plan = await makeProject("shareable");
+  const shareLink = await projectService.createProjectShareLink(plan.project.id, "https://traxly.test");
+
+  assert.ok(shareLink);
+  assert.equal(shareLink.projectId, plan.project.id);
+  assert.equal(shareLink.showBaselineVariance, false);
+  assert.equal(shareLink.reportingTargetTaskId, null);
+  assert.match(shareLink.url, /^https:\/\/traxly\.test\/share\/project\/share_/);
+
+  const token = shareLink.url.split("/").at(-1);
+  assert.ok(token);
+
+  const db = await getDb();
+  const rows = await db.select().from(projectShareLinks);
+
+  assert.equal(rows.length, 1);
+  assert.notEqual(rows[0].tokenHash, token);
+  assert.equal(rows[0].tokenHash.length, 64);
+
+  const shared = await projectService.getSharedProjectPlan(token);
+
+  assert.ok(shared);
+  assert.equal(shared.plan.project.id, plan.project.id);
+  assert.equal(shared.shareLink.showBaselineVariance, false);
+  assert.equal(shared.shareLink.reportingTargetTaskId, null);
+});
+
+test("updates project share link target and baseline variance settings independently", async () => {
+  const plan = await makeProject("share-settings");
+  const target = await projectService.createTask(plan.project.id, {
+    name: "Launch",
+    type: "milestone",
+    plannedStart: "2026-03-20",
+  });
+  const created = await projectService.createProjectShareLink(plan.project.id, "https://traxly.test");
+
+  assert.ok(created);
+  assert.ok(target);
+
+  const targetUpdated = await projectService.updateProjectShareLink(
+    plan.project.id,
+    { reportingTargetTaskId: target.taskId },
+    "https://traxly.test",
+  );
+
+  assert.ok(targetUpdated);
+  assert.equal(targetUpdated.id, created.id);
+  assert.equal(targetUpdated.showBaselineVariance, false);
+  assert.equal(targetUpdated.reportingTargetTaskId, target.taskId);
+
+  const updated = await projectService.updateProjectShareLink(plan.project.id, { showBaselineVariance: true }, "https://traxly.test");
+
+  assert.ok(updated);
+  assert.equal(updated.id, created.id);
+  assert.equal(updated.showBaselineVariance, true);
+  assert.equal(updated.reportingTargetTaskId, target.taskId);
+
+  const token = updated.url.split("/").at(-1);
+  assert.ok(token);
+
+  const shared = await projectService.getSharedProjectPlan(token);
+
+  assert.ok(shared);
+  assert.equal(shared.shareLink.showBaselineVariance, true);
+  assert.equal(shared.shareLink.reportingTargetTaskId, target.taskId);
+
+  const cleared = await projectService.updateProjectShareLink(
+    plan.project.id,
+    { reportingTargetTaskId: null },
+    "https://traxly.test",
+  );
+
+  assert.equal(cleared?.showBaselineVariance, true);
+  assert.equal(cleared?.reportingTargetTaskId, null);
+});
+
+test("creates project share links with initial reporting settings", async () => {
+  const plan = await makeProject("share-create-settings");
+  const target = await projectService.createTask(plan.project.id, {
+    name: "Launch",
+    type: "milestone",
+    plannedStart: "2026-03-20",
+  });
+
+  assert.ok(target);
+
+  const created = await projectService.createProjectShareLink(
+    plan.project.id,
+    "https://traxly.test",
+    { showBaselineVariance: true, reportingTargetTaskId: target.taskId },
+  );
+
+  assert.ok(created);
+  assert.equal(created.showBaselineVariance, true);
+  assert.equal(created.reportingTargetTaskId, target.taskId);
+
+  const reloaded = await projectService.getProjectShareLink(plan.project.id, "https://traxly.test");
+
+  assert.equal(reloaded?.showBaselineVariance, true);
+  assert.equal(reloaded?.reportingTargetTaskId, target.taskId);
+});
+
+test("rejects invalid project share link reporting targets", async () => {
+  const plan = await makeProject("share-invalid-target");
+  const summary = await projectService.createTask(plan.project.id, {
+    name: "Summary",
+    type: "summary",
+  });
+
+  assert.ok(summary);
+  assert.ok(await projectService.createProjectShareLink(plan.project.id, "https://traxly.test"));
+
+  await assert.rejects(
+    projectService.updateProjectShareLink(plan.project.id, { reportingTargetTaskId: summary.taskId }, "https://traxly.test"),
+    (error: unknown) => error instanceof Error && error.message === "Reporting target must be a leaf task or milestone.",
+  );
+
+  await assert.rejects(
+    projectService.updateProjectShareLink(plan.project.id, { reportingTargetTaskId: "missing_task" }, "https://traxly.test"),
+    (error: unknown) => error instanceof Error && error.message === "Reporting target must be a leaf task or milestone.",
+  );
+});
+
+test("revokes and regenerates project share links", async () => {
+  const plan = await makeProject("share-regenerate");
+  const target = await projectService.createTask(plan.project.id, {
+    name: "Launch",
+    type: "milestone",
+    plannedStart: "2026-03-20",
+  });
+  const first = await projectService.createProjectShareLink(plan.project.id, "https://traxly.test");
+
+  assert.ok(first);
+  assert.ok(target);
+  await projectService.updateProjectShareLink(
+    plan.project.id,
+    { showBaselineVariance: true, reportingTargetTaskId: target.taskId },
+    "https://traxly.test",
+  );
+
+  const regenerated = await projectService.regenerateProjectShareLink(plan.project.id, "https://traxly.test");
+
+  assert.ok(regenerated);
+  assert.notEqual(regenerated.url, first.url);
+  assert.equal(regenerated.showBaselineVariance, true);
+  assert.equal(regenerated.reportingTargetTaskId, target.taskId);
+
+  const firstToken = first.url.split("/").at(-1);
+  const regeneratedToken = regenerated.url.split("/").at(-1);
+
+  assert.ok(firstToken);
+  assert.ok(regeneratedToken);
+  assert.equal(await projectService.getSharedProjectPlan(firstToken), null);
+  assert.ok(await projectService.getSharedProjectPlan(regeneratedToken));
+
+  assert.equal(await projectService.revokeProjectShareLink(plan.project.id), true);
+  assert.equal(await projectService.getSharedProjectPlan(regeneratedToken), null);
+});
+
+test("regenerate can use explicit current share settings", async () => {
+  const plan = await makeProject("share-regenerate-current-settings");
+  const target = await projectService.createTask(plan.project.id, {
+    name: "Launch",
+    type: "milestone",
+    plannedStart: "2026-03-20",
+  });
+  const first = await projectService.createProjectShareLink(plan.project.id, "https://traxly.test");
+
+  assert.ok(first);
+  assert.ok(target);
+
+  const regenerated = await projectService.regenerateProjectShareLink(
+    plan.project.id,
+    "https://traxly.test",
+    { showBaselineVariance: true, reportingTargetTaskId: target.taskId },
+  );
+
+  assert.ok(regenerated);
+  assert.notEqual(regenerated.url, first.url);
+  assert.equal(regenerated.showBaselineVariance, true);
+  assert.equal(regenerated.reportingTargetTaskId, target.taskId);
+});
+
+test("project share link API requires auth and manages active link", async () => {
+  const plan = await makeProject("share-api");
+  const context = { params: Promise.resolve({ projectId: plan.project.id }) };
+
+  process.env.TRAXLY_TEST_AUTH_EMAIL = "";
+  const unauthorized = await getShareLinkRoute(new Request(`https://traxly.test/api/projects/${plan.project.id}/share`), context);
+  assert.equal(unauthorized.status, 401);
+
+  process.env.TRAXLY_TEST_AUTH_EMAIL = "owner@example.com";
+  const createdResponse = await createShareLinkRoute(new Request(`https://traxly.test/api/projects/${plan.project.id}/share`, { method: "POST" }), context);
+  const createdPayload = await createdResponse.json();
+
+  assert.equal(createdResponse.status, 200);
+  assert.ok(createdPayload.shareLink.url.includes("/share/project/"));
+  assert.equal(createdPayload.shareLink.showBaselineVariance, false);
+  assert.equal(createdPayload.shareLink.reportingTargetTaskId, null);
+
+  const target = await projectService.createTask(plan.project.id, {
+    name: "Launch",
+    type: "milestone",
+    plannedStart: "2026-03-20",
+  });
+  assert.ok(target);
+
+  const patchedResponse = await patchShareLinkRoute(
+    new Request(`https://traxly.test/api/projects/${plan.project.id}/share`, {
+      method: "PATCH",
+      body: JSON.stringify({ showBaselineVariance: true, reportingTargetTaskId: target.taskId }),
+    }),
+    context,
+  );
+  const patchedPayload = await patchedResponse.json();
+
+  assert.equal(patchedResponse.status, 200);
+  assert.equal(patchedPayload.shareLink.showBaselineVariance, true);
+  assert.equal(patchedPayload.shareLink.reportingTargetTaskId, target.taskId);
+
+  const regeneratedResponse = await regenerateShareLinkRoute(
+    new Request(`https://traxly.test/api/projects/${plan.project.id}/share/regenerate`, {
+      method: "POST",
+      body: JSON.stringify({ showBaselineVariance: true, reportingTargetTaskId: target.taskId }),
+    }),
+    context,
+  );
+  const regeneratedPayload = await regeneratedResponse.json();
+
+  assert.equal(regeneratedResponse.status, 200);
+  assert.notEqual(regeneratedPayload.shareLink.url, createdPayload.shareLink.url);
+  assert.equal(regeneratedPayload.shareLink.showBaselineVariance, true);
+  assert.equal(regeneratedPayload.shareLink.reportingTargetTaskId, target.taskId);
+
+  const revokedResponse = await revokeShareLinkRoute(new Request(`https://traxly.test/api/projects/${plan.project.id}/share`, { method: "DELETE" }), context);
+  assert.equal(revokedResponse.status, 204);
 });
 
 test("rejects nonexistent parent updates", async () => {

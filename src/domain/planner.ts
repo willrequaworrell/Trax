@@ -77,6 +77,17 @@ export const pendingUndoActionSchema = z.object({
   expiresAt: z.string(),
 });
 
+export const projectShareLinkSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  tokenHash: z.string(),
+  showBaselineVariance: z.boolean(),
+  reportingTargetTaskId: z.string().nullable(),
+  revokedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 export const projectCreateSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(1000).default(""),
@@ -154,6 +165,7 @@ export type Task = z.infer<typeof taskSchema>;
 export type Dependency = z.infer<typeof dependencySchema>;
 export type Checkpoint = z.infer<typeof checkpointSchema>;
 export type PendingUndoAction = z.infer<typeof pendingUndoActionSchema>;
+export type ProjectShareLink = z.infer<typeof projectShareLinkSchema>;
 export type TaskPendingDeletePayload = {
   kind: "task";
   rootTaskId: string;
@@ -258,6 +270,16 @@ export type ProjectExport = {
     pendingUndoActions: PendingUndoAction[];
   };
   markdown: string;
+};
+
+export type ProjectShareLinkView = {
+  id: string;
+  projectId: string;
+  url: string;
+  showBaselineVariance: boolean;
+  reportingTargetTaskId: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TaskCreateResult = {

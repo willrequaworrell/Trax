@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
-import { ArrowSquareOut, Copy, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
+import { ArrowSquareOut, Copy, LinkSimple, MagnifyingGlass, PencilSimple, Trash } from "@phosphor-icons/react";
 
-import type { Project } from "@/domain/planner";
+import type { PlannedTask, Project, ProjectPlan, ProjectShareLinkView } from "@/domain/planner";
 import { DatePickerField } from "@/features/planner/components/date-picker-field";
 import { ProjectRenameDialog } from "@/features/planner/components/project-rename-dialog";
 import { WorkspaceSidebar } from "@/features/planner/components/workspace-sidebar";
@@ -33,6 +33,13 @@ type Props = {
   initialProjects: Project[];
 };
 
+type ShareLinkSettings = Pick<ProjectShareLinkView, "showBaselineVariance" | "reportingTargetTaskId">;
+
+const defaultShareLinkSettings: ShareLinkSettings = {
+  showBaselineVariance: false,
+  reportingTargetTaskId: null,
+};
+
 export function ProjectList({ initialProjects }: Props) {
   const [projects, setProjects] = useState(initialProjects);
   const [search, setSearch] = useState("");
@@ -41,6 +48,11 @@ export function ProjectList({ initialProjects }: Props) {
   const [description, setDescription] = useState("");
   const [renameProjectId, setRenameProjectId] = useState<string | null>(null);
   const [duplicateProjectId, setDuplicateProjectId] = useState<string | null>(null);
+  const [shareProjectId, setShareProjectId] = useState<string | null>(null);
+  const [shareLink, setShareLink] = useState<ProjectShareLinkView | null>(null);
+  const [sharePlan, setSharePlan] = useState<ProjectPlan | null>(null);
+  const [shareSettings, setShareSettings] = useState<ShareLinkSettings>(defaultShareLinkSettings);
+  const [isShareLoading, setIsShareLoading] = useState(false);
   const [duplicateName, setDuplicateName] = useState("");
   const [duplicateStartDate, setDuplicateStartDate] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -160,12 +172,196 @@ export function ProjectList({ initialProjects }: Props) {
     });
   }
 
+  async function loadShareLink(projectId: string) {
+    setIsShareLoading(true);
+
+    try {
+      const [shareResponse, planResponse] = await Promise.all([
+        fetch(`/api/projects/${projectId}/share`),
+        fetch(`/api/projects/${projectId}`),
+      ]);
+      const payload = await shareResponse.json();
+      const planPayload = await planResponse.json();
+
+      if (!shareResponse.ok) {
+        throw new Error(payload.error ?? "Failed to load share link.");
+      }
+      if (!planResponse.ok) {
+        throw new Error(planPayload.error ?? "Failed to load project tasks.");
+      }
+
+      setShareLink(payload.shareLink);
+      setShareSettings(payload.shareLink ?? defaultShareLinkSettings);
+      setSharePlan(planPayload);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to load share link.");
+    } finally {
+      setIsShareLoading(false);
+    }
+  }
+
+  async function createShareLink(projectId: string) {
+    setIsShareLoading(true);
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(shareSettings),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to create share link.");
+      }
+
+      setShareLink(payload.shareLink);
+      setShareSettings(payload.shareLink);
+      if (!sharePlan) {
+        const planResponse = await fetch(`/api/projects/${projectId}`);
+        const planPayload = await planResponse.json();
+
+        if (planResponse.ok) {
+          setSharePlan(planPayload);
+        }
+      }
+      await navigator.clipboard.writeText(payload.shareLink.url);
+      toast.success("Share link copied");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create share link.");
+    } finally {
+      setIsShareLoading(false);
+    }
+  }
+
+  async function copyShareLink() {
+    if (!shareLink) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(shareLink.url);
+      toast.success("Share link copied");
+    } catch {
+      toast.error("Failed to copy share link.");
+    }
+  }
+
+  async function updateShareLink(projectId: string, patch: Partial<ShareLinkSettings>) {
+    const nextSettings = { ...shareSettings, ...patch };
+    setShareSettings(nextSettings);
+
+    if (!shareLink) {
+      return;
+    }
+
+    const previous = shareLink;
+    const previousSettings = shareSettings;
+    setShareLink({ ...shareLink, ...patch });
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/share`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to update share link.");
+      }
+
+      setShareLink(payload.shareLink);
+      setShareSettings(payload.shareLink);
+    } catch (error) {
+      setShareLink(previous);
+      setShareSettings(previousSettings);
+      toast.error(error instanceof Error ? error.message : "Failed to update share link.");
+    }
+  }
+
+  async function regenerateShareLink(projectId: string) {
+    setIsShareLoading(true);
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/share/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(shareSettings),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to regenerate share link.");
+      }
+
+      setShareLink(payload.shareLink);
+      setShareSettings(payload.shareLink);
+      await navigator.clipboard.writeText(payload.shareLink.url);
+      toast.success("New share link copied");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to regenerate share link.");
+    } finally {
+      setIsShareLoading(false);
+    }
+  }
+
+  async function revokeShareLink(projectId: string) {
+    setIsShareLoading(true);
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/share`, { method: "DELETE" });
+
+      if (!response.ok) {
+        throw new Error("Failed to revoke share link.");
+      }
+
+      setShareLink(null);
+      setShareSettings(defaultShareLinkSettings);
+      toast.success("Share link revoked");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to revoke share link.");
+    } finally {
+      setIsShareLoading(false);
+    }
+  }
+
   const projectBeingRenamed = renameProjectId
     ? projects.find((project) => project.id === renameProjectId) ?? null
     : null;
   const projectBeingDuplicated = duplicateProjectId
     ? projects.find((project) => project.id === duplicateProjectId) ?? null
     : null;
+  const projectBeingShared = shareProjectId
+    ? projects.find((project) => project.id === shareProjectId) ?? null
+    : null;
+  const shareTargetOptions = useMemo(() => {
+    if (!sharePlan) {
+      return [];
+    }
+
+    const taskById = new Map(sharePlan.tasks.map((task) => [task.id, task]));
+
+    function sectionLabel(task: PlannedTask) {
+      let cursor = task.parentId ? taskById.get(task.parentId) : undefined;
+      let topSection: PlannedTask | null = null;
+
+      while (cursor) {
+        topSection = cursor;
+        cursor = cursor.parentId ? taskById.get(cursor.parentId) : undefined;
+      }
+
+      return topSection?.name ?? "No section";
+    }
+
+    return sharePlan.tasks
+      .filter((task) => !task.isSummary)
+      .map((task) => ({
+        id: task.id,
+        label: `${sectionLabel(task)} / ${task.name}`,
+      }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [sharePlan]);
 
   return (
     <>
@@ -261,6 +457,18 @@ export function ProjectList({ initialProjects }: Props) {
                           >
                             <Copy className="size-4" />
                             Duplicate project
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => {
+                              setShareProjectId(project.id);
+                              setShareLink(null);
+                              setSharePlan(null);
+                              setShareSettings(defaultShareLinkSettings);
+                              void loadShareLink(project.id);
+                            }}
+                          >
+                            <LinkSimple className="size-4" />
+                            Share status
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             className="text-destructive focus:text-destructive"
@@ -381,6 +589,145 @@ export function ProjectList({ initialProjects }: Props) {
               {isPending ? <Spinner /> : null}
               Duplicate project
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={projectBeingShared !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setShareProjectId(null);
+            setShareLink(null);
+            setSharePlan(null);
+            setShareSettings(defaultShareLinkSettings);
+          }
+        }}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Share project status</DialogTitle>
+            <DialogDescription>
+              Create a public read-only status link for {projectBeingShared?.name ?? "this project"}.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            {isShareLoading && !shareLink ? (
+              <div className="flex items-center gap-2 rounded-lg border border-border/70 px-4 py-5 text-sm text-muted-foreground">
+                <Spinner />
+                Loading share link
+              </div>
+            ) : null}
+
+            {!isShareLoading && !shareLink ? (
+              <div className="rounded-lg border border-border/70 px-4 py-5">
+                <p className="text-sm font-medium">Sharing is off</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Create a persistent secret link that stays live until revoked.
+                </p>
+              </div>
+            ) : null}
+
+            {shareLink ? (
+              <>
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Share link</label>
+                  <div className="flex gap-2">
+                    <Input value={shareLink.url} readOnly />
+                    <Button type="button" variant="outline" onClick={() => void copyShareLink()}>
+                      <Copy className="size-4" />
+                      Copy
+                    </Button>
+                  </div>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  Created {new Date(shareLink.createdAt).toLocaleDateString()}. Regenerating the link disables the current URL.
+                </p>
+              </>
+            ) : null}
+
+            {sharePlan ? (
+              <>
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-border/70 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-medium">Show baseline variance</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Adds baseline date and business-day delta fields to the public page.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="size-5 rounded border-input accent-primary"
+                    checked={shareSettings.showBaselineVariance}
+                    onChange={(event) => {
+                      if (projectBeingShared) {
+                        void updateShareLink(projectBeingShared.id, {
+                          showBaselineVariance: event.currentTarget.checked,
+                        });
+                      }
+                    }}
+                  />
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-border/70 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-medium">Reporting target</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Sets the target date highlighted on the public page.
+                    </p>
+                  </div>
+                  <select
+                    className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring/20"
+                    value={shareSettings.reportingTargetTaskId ?? ""}
+                    onChange={(event) => {
+                      if (projectBeingShared) {
+                        void updateShareLink(projectBeingShared.id, {
+                          reportingTargetTaskId: event.currentTarget.value || null,
+                        });
+                      }
+                    }}
+                  >
+                    <option value="">Whole tracker forecast end</option>
+                    {shareTargetOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            ) : null}
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShareProjectId(null);
+                setShareLink(null);
+                setSharePlan(null);
+                setShareSettings(defaultShareLinkSettings);
+              }}
+            >
+              Close
+            </Button>
+            {projectBeingShared && shareLink ? (
+              <>
+                <Button variant="outline" onClick={() => void regenerateShareLink(projectBeingShared.id)} disabled={isShareLoading}>
+                  {isShareLoading ? <Spinner /> : null}
+                  Regenerate
+                </Button>
+                <Button variant="destructive" onClick={() => void revokeShareLink(projectBeingShared.id)} disabled={isShareLoading}>
+                  Revoke
+                </Button>
+              </>
+            ) : null}
+            {projectBeingShared && !shareLink ? (
+              <Button onClick={() => void createShareLink(projectBeingShared.id)} disabled={isShareLoading}>
+                {isShareLoading ? <Spinner /> : null}
+                Create link
+              </Button>
+            ) : null}
           </DialogFooter>
         </DialogContent>
       </DialogRoot>

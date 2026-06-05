@@ -1,3 +1,4 @@
+import { createHash, createHmac } from "node:crypto";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { addDurationToStart, businessDaysInclusive, clampToBusinessDay, shiftBusinessDays } from "@/domain/date-utils";
 import {
@@ -26,6 +27,8 @@ import {
   type ProjectCreateInput,
   type ProjectExport,
   type ProjectPlan,
+  type ProjectShareLink,
+  type ProjectShareLinkView,
   type ProjectUpdateInput,
   type TaskPendingDeletePayload,
   type Task,
@@ -54,6 +57,46 @@ function now() {
 
 function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
+}
+
+function requireShareSecret() {
+  const secret = process.env.AUTH_SECRET?.trim();
+
+  if (!secret) {
+    throw new Error("AUTH_SECRET must be set before project share links can be managed.");
+  }
+
+  return secret;
+}
+
+function createShareToken(linkId: string) {
+  const signature = createHmac("sha256", requireShareSecret()).update(linkId).digest("base64url");
+  return `${linkId}.${signature}`;
+}
+
+function hashShareToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function shareUrl(origin: string, token: string) {
+  return `${origin.replace(/\/$/, "")}/share/project/${token}`;
+}
+
+type ProjectShareLinkSettingsInput = {
+  showBaselineVariance?: boolean;
+  reportingTargetTaskId?: string | null;
+};
+
+function toShareLinkView(link: ProjectShareLink, origin: string): ProjectShareLinkView {
+  return {
+    id: link.id,
+    projectId: link.projectId,
+    url: shareUrl(origin, createShareToken(link.id)),
+    showBaselineVariance: link.showBaselineVariance,
+    reportingTargetTaskId: link.reportingTargetTaskId,
+    createdAt: link.createdAt,
+    updatedAt: link.updatedAt,
+  };
 }
 
 function expiresAt(createdAt: string) {
@@ -477,6 +520,155 @@ export async function updateProject(projectId: string, input: ProjectUpdateInput
 
 export async function deleteProject(projectId: string) {
   await projectRepository.deleteProject(projectId);
+}
+
+export async function getProjectShareLink(projectId: string, origin: string): Promise<ProjectShareLinkView | null> {
+  const project = await projectRepository.getProject(projectId);
+
+  if (!project) {
+    return null;
+  }
+
+  const link = await projectRepository.getActiveProjectShareLink(projectId);
+  return link ? toShareLinkView(link, origin) : null;
+}
+
+export async function createProjectShareLink(
+  projectId: string,
+  origin: string,
+  input: ProjectShareLinkSettingsInput = {},
+): Promise<ProjectShareLinkView | null> {
+  const project = await projectRepository.getProject(projectId);
+
+  if (!project) {
+    return null;
+  }
+
+  const existing = await projectRepository.getActiveProjectShareLink(projectId);
+
+  if (existing) {
+    return Object.keys(input).length > 0
+      ? updateProjectShareLink(projectId, input, origin)
+      : toShareLinkView(existing, origin);
+  }
+
+  const createdAt = now();
+  const id = createId("share");
+  const token = createShareToken(id);
+  const link: ProjectShareLink = {
+    id,
+    projectId,
+    tokenHash: hashShareToken(token),
+    showBaselineVariance: false,
+    reportingTargetTaskId: null,
+    revokedAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  await projectRepository.createProjectShareLink(link);
+  return Object.keys(input).length > 0
+    ? updateProjectShareLink(projectId, input, origin)
+    : toShareLinkView(link, origin);
+}
+
+export async function updateProjectShareLink(
+  projectId: string,
+  input: ProjectShareLinkSettingsInput,
+  origin: string,
+): Promise<ProjectShareLinkView | null> {
+  const link = await projectRepository.getActiveProjectShareLink(projectId);
+
+  if (!link) {
+    return null;
+  }
+
+  let reportingTargetTaskId = link.reportingTargetTaskId;
+
+  if ("reportingTargetTaskId" in input) {
+    reportingTargetTaskId = input.reportingTargetTaskId ?? null;
+
+    if (reportingTargetTaskId) {
+      const plan = await getProjectPlan(projectId);
+      const target = plan?.tasks.find((task) => task.id === reportingTargetTaskId);
+
+      if (!target || target.isSummary) {
+        throw new ValidationError("Reporting target must be a leaf task or milestone.");
+      }
+    }
+  }
+
+  const updated: ProjectShareLink = {
+    ...link,
+    showBaselineVariance: input.showBaselineVariance ?? link.showBaselineVariance,
+    reportingTargetTaskId,
+    updatedAt: now(),
+  };
+
+  await projectRepository.updateProjectShareLink(link.id, updated);
+  return toShareLinkView(updated, origin);
+}
+
+export async function revokeProjectShareLink(projectId: string) {
+  const project = await projectRepository.getProject(projectId);
+
+  if (!project) {
+    return false;
+  }
+
+  await projectRepository.revokeProjectShareLinks(projectId, now());
+  return true;
+}
+
+export async function regenerateProjectShareLink(
+  projectId: string,
+  origin: string,
+  input: ProjectShareLinkSettingsInput = {},
+): Promise<ProjectShareLinkView | null> {
+  const existing = await projectRepository.getActiveProjectShareLink(projectId);
+  const showBaselineVariance = input.showBaselineVariance ?? existing?.showBaselineVariance ?? false;
+  const reportingTargetTaskId = "reportingTargetTaskId" in input
+    ? input.reportingTargetTaskId ?? null
+    : existing?.reportingTargetTaskId ?? null;
+  const revoked = await revokeProjectShareLink(projectId);
+
+  if (!revoked) {
+    return null;
+  }
+
+  const created = await createProjectShareLink(projectId, origin);
+
+  if (!created || (!showBaselineVariance && !reportingTargetTaskId)) {
+    return created;
+  }
+
+  return updateProjectShareLink(projectId, { showBaselineVariance, reportingTargetTaskId }, origin);
+}
+
+export async function getSharedProjectPlan(token: string) {
+  const link = await projectRepository.getProjectShareLinkByTokenHash(hashShareToken(token));
+
+  if (!link) {
+    return null;
+  }
+
+  const plan = await getProjectPlan(link.projectId);
+
+  if (!plan) {
+    return null;
+  }
+
+  return {
+    plan,
+    shareLink: {
+      id: link.id,
+      projectId: link.projectId,
+      showBaselineVariance: link.showBaselineVariance,
+      reportingTargetTaskId: link.reportingTargetTaskId,
+      createdAt: link.createdAt,
+      updatedAt: link.updatedAt,
+    },
+  };
 }
 
 function nextSortOrder(siblings: Task[]) {

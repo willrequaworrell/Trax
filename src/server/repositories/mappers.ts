@@ -1,4 +1,4 @@
-import type { Checkpoint, Dependency, PendingDeleteAction, Project, Task } from "@/domain/planner";
+import type { Checkpoint, Dependency, PendingDeleteAction, Project, ProjectShareLink, Task } from "@/domain/planner";
 import type {
   CheckpointInsert,
   CheckpointRow,
@@ -8,6 +8,8 @@ import type {
   PendingDeleteActionRow,
   ProjectInsert,
   ProjectRow,
+  ProjectShareLinkInsert,
+  ProjectShareLinkRow,
   TaskInsert,
   TaskRow,
 } from "@/server/db/schema";
@@ -88,6 +90,19 @@ export function mapPendingDeleteActionRow(row: PendingDeleteActionRow): PendingD
   };
 }
 
+export function mapProjectShareLinkRow(row: ProjectShareLinkRow): ProjectShareLink {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    tokenHash: row.tokenHash,
+    showBaselineVariance: row.showBaselineVariance,
+    reportingTargetTaskId: row.reportingTargetTaskId ?? null,
+    revokedAt: row.revokedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 export function toProjectInsert(project: Project): ProjectInsert {
   return {
     id: project.id,
@@ -161,5 +176,18 @@ export function toPendingDeleteActionInsert(action: PendingDeleteAction): Pendin
     payloadJson: JSON.stringify(action.payload),
     createdAt: action.createdAt,
     expiresAt: action.expiresAt,
+  };
+}
+
+export function toProjectShareLinkInsert(link: ProjectShareLink): ProjectShareLinkInsert {
+  return {
+    id: link.id,
+    projectId: link.projectId,
+    tokenHash: link.tokenHash,
+    showBaselineVariance: link.showBaselineVariance,
+    reportingTargetTaskId: link.reportingTargetTaskId,
+    revokedAt: link.revokedAt,
+    createdAt: link.createdAt,
+    updatedAt: link.updatedAt,
   };
 }

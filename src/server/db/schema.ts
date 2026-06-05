@@ -105,10 +105,31 @@ export const pendingDeleteActions = pgTable(
   }),
 );
 
+export const projectShareLinks = pgTable(
+  "project_share_links",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    showBaselineVariance: boolean("show_baseline_variance").notNull().default(false),
+    reportingTargetTaskId: text("reporting_target_task_id"),
+    revokedAt: text("revoked_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => ({
+    projectIdx: index("project_share_links_project_idx").on(table.projectId),
+    tokenHashIdx: index("project_share_links_token_hash_idx").on(table.tokenHash),
+  }),
+);
+
 export const projectRelations = relations(projects, ({ many }) => ({
   tasks: many(tasks),
   dependencies: many(dependencies),
   pendingDeleteActions: many(pendingDeleteActions),
+  shareLinks: many(projectShareLinks),
 }));
 
 export const taskRelations = relations(tasks, ({ one, many }) => ({
@@ -164,13 +185,22 @@ export const pendingDeleteActionRelations = relations(pendingDeleteActions, ({ o
   }),
 }));
 
+export const projectShareLinkRelations = relations(projectShareLinks, ({ one }) => ({
+  project: one(projects, {
+    fields: [projectShareLinks.projectId],
+    references: [projects.id],
+  }),
+}));
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type TaskRow = typeof tasks.$inferSelect;
 export type DependencyRow = typeof dependencies.$inferSelect;
 export type CheckpointRow = typeof checkpoints.$inferSelect;
 export type PendingDeleteActionRow = typeof pendingDeleteActions.$inferSelect;
+export type ProjectShareLinkRow = typeof projectShareLinks.$inferSelect;
 export type ProjectInsert = typeof projects.$inferInsert;
 export type TaskInsert = typeof tasks.$inferInsert;
 export type DependencyInsert = typeof dependencies.$inferInsert;
 export type CheckpointInsert = typeof checkpoints.$inferInsert;
 export type PendingDeleteActionInsert = typeof pendingDeleteActions.$inferInsert;
+export type ProjectShareLinkInsert = typeof projectShareLinks.$inferInsert;

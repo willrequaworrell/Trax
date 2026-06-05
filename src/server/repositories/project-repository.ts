@@ -1,18 +1,20 @@
-import { and, asc, eq, gt, inArray, lte, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 
-import type { Checkpoint, Dependency, PendingDeleteAction, Project, Task } from "@/domain/planner";
+import type { Checkpoint, Dependency, PendingDeleteAction, Project, ProjectShareLink, Task } from "@/domain/planner";
 import { type AppDatabase, getDb } from "@/server/db/client";
-import { type CheckpointRow, checkpoints, dependencies, pendingDeleteActions, projects, tasks } from "@/server/db/schema";
+import { type CheckpointRow, checkpoints, dependencies, pendingDeleteActions, projects, projectShareLinks, tasks } from "@/server/db/schema";
 import {
   mapCheckpointRow,
   mapDependencyRow,
   mapPendingDeleteActionRow,
   mapProjectRow,
+  mapProjectShareLinkRow,
   mapTaskRow,
   toCheckpointInsert,
   toDependencyInsert,
   toPendingDeleteActionInsert,
   toProjectInsert,
+  toProjectShareLinkInsert,
   toTaskInsert,
 } from "@/server/repositories/mappers";
 
@@ -39,6 +41,41 @@ function isMissingRelationError(error: unknown, relationName: string) {
         code === "42P01" ||
         message.includes(`relation ${quotedRelation} does not exist`) ||
         message.includes(`table ${quotedRelation} does not exist`)
+      ) {
+        return true;
+      }
+
+      if ("cause" in record) {
+        queue.push(record.cause);
+      }
+    }
+  }
+
+  return false;
+}
+
+function isMissingColumnError(error: unknown, columnName: string) {
+  const visited = new Set<unknown>();
+  const queue: unknown[] = [error];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+
+    if (!current || visited.has(current)) {
+      continue;
+    }
+
+    visited.add(current);
+
+    if (typeof current === "object") {
+      const record = current as Record<string, unknown>;
+      const message = typeof record.message === "string" ? record.message : "";
+      const code = typeof record.code === "string" ? record.code : "";
+
+      if (
+        code === "42703" ||
+        message.includes(`column "${columnName}" does not exist`) ||
+        message.includes(`column ${columnName} does not exist`)
       ) {
         return true;
       }
@@ -80,6 +117,22 @@ function isUnsupportedTransactionError(error: unknown) {
   }
 
   return false;
+}
+
+function normalizeProjectShareLinkRow(row: {
+  id: string;
+  projectId: string;
+  tokenHash: string;
+  showBaselineVariance: boolean;
+  reportingTargetTaskId?: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}) {
+  return mapProjectShareLinkRow({
+    ...row,
+    reportingTargetTaskId: row.reportingTargetTaskId ?? null,
+  });
 }
 
 export class ProjectRepository {
@@ -209,6 +262,146 @@ export class ProjectRepository {
   async deleteProject(projectId: string) {
     const db = await getDb();
     await db.delete(projects).where(eq(projects.id, projectId));
+  }
+
+  async getActiveProjectShareLink(projectId: string) {
+    const db = await getDb();
+    let row;
+
+    try {
+      row = await db.query.projectShareLinks.findFirst({
+        where: and(eq(projectShareLinks.projectId, projectId), isNull(projectShareLinks.revokedAt)),
+        orderBy: (table, { desc }) => [desc(table.createdAt)],
+      });
+    } catch (error) {
+      if (isMissingColumnError(error, "reporting_target_task_id")) {
+        console.warn("Project share link reporting target column is missing; target selection is unavailable until the latest migration is applied.");
+        row = await db
+          .select({
+            id: projectShareLinks.id,
+            projectId: projectShareLinks.projectId,
+            tokenHash: projectShareLinks.tokenHash,
+            showBaselineVariance: projectShareLinks.showBaselineVariance,
+            revokedAt: projectShareLinks.revokedAt,
+            createdAt: projectShareLinks.createdAt,
+            updatedAt: projectShareLinks.updatedAt,
+          })
+          .from(projectShareLinks)
+          .where(and(eq(projectShareLinks.projectId, projectId), isNull(projectShareLinks.revokedAt)))
+          .orderBy(asc(projectShareLinks.createdAt))
+          .then((rows) => rows.at(-1));
+      } else
+      if (!isMissingRelationError(error, "project_share_links")) {
+        throw error;
+      }
+
+      if (!row) {
+        console.warn("Project share links table is missing; sharing is unavailable until the latest migration is applied.");
+        return null;
+      }
+    }
+
+    return row ? normalizeProjectShareLinkRow(row) : null;
+  }
+
+  async getProjectShareLinkByTokenHash(tokenHash: string) {
+    const db = await getDb();
+    let row;
+
+    try {
+      row = await db.query.projectShareLinks.findFirst({
+        where: and(eq(projectShareLinks.tokenHash, tokenHash), isNull(projectShareLinks.revokedAt)),
+      });
+    } catch (error) {
+      if (isMissingColumnError(error, "reporting_target_task_id")) {
+        console.warn("Project share link reporting target column is missing; target selection is unavailable until the latest migration is applied.");
+        row = await db
+          .select({
+            id: projectShareLinks.id,
+            projectId: projectShareLinks.projectId,
+            tokenHash: projectShareLinks.tokenHash,
+            showBaselineVariance: projectShareLinks.showBaselineVariance,
+            revokedAt: projectShareLinks.revokedAt,
+            createdAt: projectShareLinks.createdAt,
+            updatedAt: projectShareLinks.updatedAt,
+          })
+          .from(projectShareLinks)
+          .where(and(eq(projectShareLinks.tokenHash, tokenHash), isNull(projectShareLinks.revokedAt)))
+          .then((rows) => rows[0]);
+      } else
+      if (!isMissingRelationError(error, "project_share_links")) {
+        throw error;
+      }
+
+      if (!row) {
+        console.warn("Project share links table is missing; public share links are unavailable until the latest migration is applied.");
+        return null;
+      }
+    }
+
+    return row ? normalizeProjectShareLinkRow(row) : null;
+  }
+
+  async createProjectShareLink(link: ProjectShareLink) {
+    const db = await getDb();
+    try {
+      await db.insert(projectShareLinks).values(toProjectShareLinkInsert(link));
+    } catch (error) {
+      if (!isMissingColumnError(error, "reporting_target_task_id")) {
+        throw error;
+      }
+
+      console.warn("Project share link reporting target column is missing; creating share link without target metadata.");
+      await db.insert(projectShareLinks).values({
+        id: link.id,
+        projectId: link.projectId,
+        tokenHash: link.tokenHash,
+        showBaselineVariance: link.showBaselineVariance,
+        revokedAt: link.revokedAt,
+        createdAt: link.createdAt,
+        updatedAt: link.updatedAt,
+      });
+    }
+    return link;
+  }
+
+  async updateProjectShareLink(linkId: string, values: Partial<ProjectShareLink>) {
+    const db = await getDb();
+    try {
+      await db
+        .update(projectShareLinks)
+        .set({
+          tokenHash: values.tokenHash,
+          showBaselineVariance: values.showBaselineVariance,
+          reportingTargetTaskId: values.reportingTargetTaskId,
+          revokedAt: values.revokedAt,
+          updatedAt: values.updatedAt,
+        })
+        .where(eq(projectShareLinks.id, linkId));
+    } catch (error) {
+      if (!isMissingColumnError(error, "reporting_target_task_id")) {
+        throw error;
+      }
+
+      console.warn("Project share link reporting target column is missing; updating share link without target metadata.");
+      await db
+        .update(projectShareLinks)
+        .set({
+          tokenHash: values.tokenHash,
+          showBaselineVariance: values.showBaselineVariance,
+          revokedAt: values.revokedAt,
+          updatedAt: values.updatedAt,
+        })
+        .where(eq(projectShareLinks.id, linkId));
+    }
+  }
+
+  async revokeProjectShareLinks(projectId: string, revokedAt: string) {
+    const db = await getDb();
+    await db
+      .update(projectShareLinks)
+      .set({ revokedAt, updatedAt: revokedAt })
+      .where(and(eq(projectShareLinks.projectId, projectId), isNull(projectShareLinks.revokedAt)));
   }
 
   async insertTasks(taskList: Task[]) {

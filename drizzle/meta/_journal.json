@@ -29,6 +29,20 @@
       "when": 1774410273086,
       "tag": "0003_supreme_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780670048130,
+      "tag": "0004_fluffy_golden_guardian",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1780670048131,
+      "tag": "0005_reporting_target_task",
+      "breakpoints": true
     }
   ]
 }
