@@ -2,6 +2,7 @@
 
 import { CalendarBlank, X } from "@phosphor-icons/react";
 import { format } from "date-fns";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -29,10 +30,20 @@ export function DatePickerField({
   onOpenChange,
   triggerClassName,
 }: Props) {
+  const [internalOpen, setInternalOpen] = useState(false);
   const selected = value ? new Date(`${value}T12:00:00.000Z`) : undefined;
+  const isOpen = open ?? internalOpen;
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (open === undefined) {
+      setInternalOpen(nextOpen);
+    }
+
+    onOpenChange?.(nextOpen);
+  }
 
   return (
-    <PopoverRoot open={open} onOpenChange={onOpenChange}>
+    <PopoverRoot open={isOpen} onOpenChange={handleOpenChange}>
       <div className={cn("flex items-center gap-1", className)}>
         <PopoverTrigger asChild disabled={disabled}>
           <Button
@@ -65,8 +76,12 @@ export function DatePickerField({
       <PopoverContent className="w-auto p-0">
         <Calendar
           mode="single"
+          defaultMonth={selected}
           selected={selected}
-          onSelect={(date) => onChange(date ? date.toISOString().slice(0, 10) : null)}
+          onSelect={(date) => {
+            onChange(date ? format(date, "yyyy-MM-dd") : null);
+            handleOpenChange(false);
+          }}
         />
       </PopoverContent>
     </PopoverRoot>
