@@ -57,6 +57,21 @@ function deriveBaselineLeafDuration(task: Task) {
   );
 }
 
+function deriveLeafProgressWeight(task: Task, forecastDurationDays: number, baselineDurationDays: number) {
+  if (task.type === "milestone") {
+    return 0;
+  }
+
+  const hasBaselineSchedule =
+    task.baselinePlannedStart !== null ||
+    task.baselinePlannedEnd !== null ||
+    task.baselinePlannedDurationDays !== null;
+
+  return hasBaselineSchedule
+    ? Math.max(baselineDurationDays, 1)
+    : Math.max(forecastDurationDays, 1);
+}
+
 function deriveLeafDurationFromSchedule(
   type: Task["type"],
   plannedStart: string | null,
@@ -411,7 +426,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
           : null,
       computedActualStart: derivedActualStart(task),
       computedActualEnd: task.actualEnd,
-      rolledUpEffortDays: task.type === "milestone" ? 0 : Math.max(durationDays, 1),
+      rolledUpEffortDays: deriveLeafProgressWeight(task, durationDays, baselineDurationDays),
       rolledUpPercentComplete: percentComplete,
       rolledUpStatus: leafStatus,
       checkpoints,

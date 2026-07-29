@@ -177,6 +177,36 @@ test("computes project percent complete from weighted root effort", () => {
   assert.equal(plan.projectPercentComplete, 67);
 });
 
+test("weights progress by baseline sizing instead of expanded forecast duration", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({ id: "summary", name: "Solution Build/Test", type: "summary", plannedMode: null, plannedStart: null, plannedDurationDays: null }),
+      makeTask({
+        id: "test-data",
+        name: "Determine & prepare test data/cases",
+        parentId: "summary",
+        plannedStart: "2026-07-13",
+        plannedDurationDays: 13,
+        baselinePlannedStart: "2026-07-08",
+        baselinePlannedDurationDays: 1,
+        percentComplete: 50,
+      }),
+      makeTask({ id: "dev", name: "Prepare DEV environment", parentId: "summary", plannedDurationDays: 1, baselinePlannedStart: "2026-07-09", baselinePlannedDurationDays: 1 }),
+      makeTask({ id: "build", name: "Build solution", parentId: "summary", plannedDurationDays: 6, baselinePlannedStart: "2026-07-10", baselinePlannedDurationDays: 6 }),
+      makeTask({ id: "review", name: "Code review", parentId: "summary", plannedDurationDays: 1, baselinePlannedStart: "2026-07-20", baselinePlannedDurationDays: 1 }),
+      makeTask({ id: "demo", name: "Demo", parentId: "summary", plannedDurationDays: 1, baselinePlannedStart: "2026-07-21", baselinePlannedDurationDays: 1 }),
+    ],
+    dependencies: [],
+    checkpoints: [],
+  });
+
+  const summary = plan.tasks.find((task) => task.id === "summary");
+  assert.equal(summary?.rolledUpEffortDays, 10);
+  assert.equal(summary?.rolledUpPercentComplete, 5);
+  assert.equal(plan.projectPercentComplete, 5);
+});
+
 test("flags cycles", () => {
     const plan = computeProjectPlan({
       project: makeProject(),
