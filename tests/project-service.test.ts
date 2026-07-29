@@ -89,7 +89,7 @@ async function withMockedSnapshot(projectId: string, snapshot: ProjectSnapshot, 
 
 test.beforeEach(async () => {
   process.env.TRAXLY_TEST_AUTH_EMAIL = "owner@example.com";
-  projectService.__testUtils.setNowOverride(null);
+  projectService.__testUtils.setNowOverride("2026-03-16T15:00:00.000Z");
   await resetDatabase();
 });
 
@@ -1501,6 +1501,77 @@ test("editing a forecast task cascades downstream forecast dates", async () => {
   assert.equal(storedC?.plannedStart, "2026-03-23");
 });
 
+test("plan reads persist overdue corrections, cascade successors, and are same-day idempotent", async () => {
+  projectService.__testUtils.setNowOverride("2026-07-01T15:00:00.000Z");
+  const plan = await makeProject("overdue-read-reconciliation");
+  const taskA = await projectService.createTask(plan.project.id, {
+    name: "A",
+    type: "task",
+    plannedStart: "2026-07-01",
+    plannedDurationDays: 3,
+  });
+  const taskB = await projectService.createTask(plan.project.id, {
+    name: "B",
+    type: "task",
+    plannedStart: "2026-07-06",
+    plannedDurationDays: 2,
+  });
+  await projectService.createDependency(plan.project.id, {
+    predecessorTaskId: taskA!.taskId,
+    successorTaskId: taskB!.taskId,
+    type: "FS",
+    lagDays: 0,
+  });
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(taskA!.taskId, {
+    actualStart: "2026-07-01",
+    percentComplete: 60,
+  });
+
+  projectService.__testUtils.setNowOverride("2026-07-10T15:00:00.000Z");
+  await projectService.getProjectPlan(plan.project.id);
+
+  const firstA = await projectRepository.getTask(taskA!.taskId);
+  const firstB = await projectRepository.getTask(taskB!.taskId);
+  const firstProject = await projectRepository.getProject(plan.project.id);
+
+  assert.equal(firstA?.plannedDurationDays, 8);
+  assert.equal(firstA?.baselinePlannedDurationDays, 3);
+  assert.equal(firstA?.actualStart, "2026-07-01");
+  assert.equal(firstB?.plannedStart, "2026-07-13");
+  assert.equal(firstProject?.updatedAt, "2026-07-10T15:00:00.000Z");
+
+  projectService.__testUtils.setNowOverride("2026-07-10T20:00:00.000Z");
+  await projectService.getProjectPlan(plan.project.id);
+  const secondProject = await projectRepository.getProject(plan.project.id);
+
+  assert.equal(secondProject?.updatedAt, "2026-07-10T15:00:00.000Z");
+});
+
+test("freeze baseline reconciles an overdue forecast before capturing it", async () => {
+  projectService.__testUtils.setNowOverride("2026-07-01T15:00:00.000Z");
+  const plan = await makeProject("freeze-overdue-forecast");
+  const task = await projectService.createTask(plan.project.id, {
+    name: "Task",
+    type: "task",
+    plannedStart: "2026-07-01",
+    plannedDurationDays: 3,
+  });
+
+  projectService.__testUtils.setNowOverride("2026-07-10T15:00:00.000Z");
+  await projectService.freezeProjectBaseline(plan.project.id);
+  const stored = await projectRepository.getTask(task!.taskId);
+
+  assert.equal(stored?.plannedStart, "2026-07-10");
+  assert.equal(stored?.baselinePlannedStart, "2026-07-10");
+  assert.equal(stored?.baselinePlannedDurationDays, 3);
+});
+
+test("planning status date uses New York time and advances weekends", () => {
+  assert.equal(projectService.__testUtils.planningStatusDate("2026-07-30T03:30:00.000Z"), "2026-07-29");
+  assert.equal(projectService.__testUtils.planningStatusDate("2026-03-08T06:30:00.000Z"), "2026-03-09");
+});
+
 test("freeze baseline copies the current forecast and can replace an existing baseline", async () => {
   const plan = await makeProject("freeze-baseline");
   const created = await projectService.createTask(plan.project.id, {
@@ -1530,6 +1601,7 @@ test("freeze baseline copies the current forecast and can replace an existing ba
 });
 
 test("freeze baseline snapshots dependency-adjusted forecast dates", async () => {
+  projectService.__testUtils.setNowOverride("2026-03-09T15:00:00.000Z");
   const plan = await makeProject("freeze-baseline-dependencies");
   const predecessor = await projectService.createTask(plan.project.id, {
     name: "A",
@@ -1623,6 +1695,7 @@ test("duplicate with start date shifts forecast and resets actuals and baseline"
 });
 
 test("duplicate normalizes copied forecast dependencies", async () => {
+  projectService.__testUtils.setNowOverride("2026-03-09T15:00:00.000Z");
   const plan = await makeProject("duplicate-normalizes-dependencies");
   const predecessor = await projectService.createTask(plan.project.id, {
     name: "A",
@@ -1765,7 +1838,7 @@ test("exportProject returns actual-first markdown and enriched json", async () =
   assert.match(exported.markdown, /issues:/);
   assert.match(exported.markdown, /Define \| type section/);
   assert.match(exported.markdown, /Define \| type section .* actual 2026-03-17 -> TBD /);
-  assert.match(exported.markdown, /In progress task \| type task \| status in_progress \| progress 50% \| current 2026-03-17 -> 2026-03-18 \(actual_start_forecast_end\)/);
+  assert.match(exported.markdown, /In progress task \| type task \| status in_progress \| progress 50% \| current 2026-03-17 -> 2026-03-30 \(actual_start_forecast_end\)/);
   assert.match(exported.markdown, /Completed task \| type task \| status done \| progress 100% \| current 2026-03-18 -> 2026-03-20 \(actual\)/);
   assert.match(exported.markdown, /Not started task \| type task \| status not_started \| progress 0% \| current .* \(forecast\)/);
 

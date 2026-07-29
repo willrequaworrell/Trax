@@ -44,7 +44,11 @@ import { checkpoints, dependencies, pendingDeleteActions, projects, tasks } from
 import { ActualEndRequiredError, ActualStartRequiredError, BaselineRequiredError, CorruptedProjectError, ValidationError } from "@/server/errors";
 import { toCheckpointInsert, toDependencyInsert, toPendingDeleteActionInsert, toTaskInsert } from "@/server/repositories/mappers";
 import { projectRepository } from "@/server/repositories/project-repository";
-import { cascadeForecastFromSeeds, rebaseForecastTasks } from "@/server/services/forecast-schedule";
+import {
+  cascadeForecastFromSeeds,
+  rebaseForecastTasks,
+  reconcileOverdueForecast,
+} from "@/server/services/forecast-schedule";
 import { duplicateProjectSnapshot } from "@/server/services/project-duplication";
 import { normalizeStoredTaskStatus } from "@/server/services/task-normalization";
 
@@ -53,6 +57,17 @@ let nowOverride: string | null = null;
 
 function now() {
   return nowOverride ?? new Date().toISOString();
+}
+
+function planningStatusDate(currentTime: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(currentTime));
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  return clampToBusinessDay(`${values.get("year")}-${values.get("month")}-${values.get("day")}`);
 }
 
 function createId(prefix: string) {
@@ -189,41 +204,72 @@ function ensureActualStartForExecution(existing: Task, patch: TaskUpdateInput) {
   }
 }
 
-async function persistForecastChanges(projectId: string, tasks: Task[]) {
-  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+async function persistForecastChanges(projectId: string, nextTasks: Task[], existingSnapshot?: ProjectSnapshot) {
+  const snapshot = existingSnapshot ?? await projectRepository.getProjectSnapshot(projectId, now());
 
   if (!snapshot) {
     throw new ValidationError("Project not found.");
   }
 
   const previousById = new Map(snapshot.tasks.map((task) => [task.id, task]));
-  const updatedAt = now();
-
-  for (const task of tasks) {
+  const changedTasks = nextTasks.filter((task) => {
     const previous = previousById.get(task.id);
+    return previous && !areTaskForecastFieldsEqual(previous, task);
+  });
 
-    if (!previous) {
-      continue;
-    }
-
-    if (areTaskForecastFieldsEqual(previous, task)) {
-      continue;
-    }
-
-    await projectRepository.updateTask(task.id, {
-      plannedMode: task.plannedMode,
-      plannedStart: task.plannedStart,
-      plannedEnd: task.plannedEnd,
-      plannedDurationDays: task.plannedDurationDays,
-      updatedAt,
-    });
+  if (changedTasks.length === 0) {
+    return false;
   }
 
-  await projectRepository.updateProject(projectId, { updatedAt });
+  const updatedAt = now();
+
+  await projectRepository.withTransaction(async (tx) => {
+    for (const task of changedTasks) {
+      await tx
+        .update(tasks)
+        .set({
+          plannedMode: task.plannedMode,
+          plannedStart: task.plannedStart,
+          plannedEnd: task.plannedEnd,
+          plannedDurationDays: task.plannedDurationDays,
+          updatedAt,
+        })
+        .where(and(eq(tasks.id, task.id), eq(tasks.projectId, projectId)));
+    }
+
+    await tx.update(projects).set({ updatedAt }).where(eq(projects.id, projectId));
+  });
+
+  return true;
+}
+
+async function reconcileProjectForecast(projectId: string) {
+  const currentTime = now();
+  const snapshot = await projectRepository.getProjectSnapshot(projectId, currentTime);
+
+  if (!snapshot) {
+    return null;
+  }
+
+  assertProjectTreeIsValid(projectId, snapshot.tasks);
+  const nextTasks = reconcileOverdueForecast(snapshot, planningStatusDate(currentTime));
+  const changed = await persistForecastChanges(projectId, nextTasks, snapshot);
+
+  if (!changed) {
+    return snapshot;
+  }
+
+  const refreshed = await projectRepository.getProjectSnapshot(projectId, currentTime);
+
+  if (!refreshed) {
+    throw new ValidationError("Project not found after its forecast was reconciled.");
+  }
+
+  return refreshed;
 }
 
 async function cascadeProjectForecast(projectId: string, seedTaskIds: string[], includeSeeds = false) {
-  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+  const snapshot = await projectRepository.getProjectSnapshot(projectId, now());
 
   if (!snapshot) {
     throw new ValidationError("Project not found.");
@@ -405,7 +451,7 @@ export async function listProjects() {
 }
 
 export async function getProjectPlan(projectId: string) {
-  const snapshot = await projectRepository.getProjectSnapshot(projectId, now());
+  const snapshot = await reconcileProjectForecast(projectId);
 
   if (!snapshot) {
     return null;
@@ -479,7 +525,7 @@ export async function rebaseProjectForecast(projectId: string, startDate: string
 }
 
 export async function freezeProjectBaseline(projectId: string) {
-  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+  const snapshot = await reconcileProjectForecast(projectId);
 
   if (!snapshot) {
     return null;
@@ -1747,6 +1793,7 @@ export const __testUtils = {
   collectProjectTreeIssues,
   hasChildTasks,
   normalizeTaskPatch,
+  planningStatusDate,
   setNowOverride(value: string | null) {
     nowOverride = value;
   },

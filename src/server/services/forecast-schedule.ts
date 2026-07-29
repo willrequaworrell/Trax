@@ -197,7 +197,9 @@ function resolveTaskStart(
       ? shiftBusinessDays(requiredEnd, -(durationDays - 1))
       : requiredEnd;
 
-  return clampToBusinessDay(maxIsoDate([requiredStart, earliestByEnd]) ?? fallbackStart ?? new Date().toISOString().slice(0, 10));
+  return clampToBusinessDay(
+    maxIsoDate([fallbackStart, requiredStart, earliestByEnd]) ?? new Date().toISOString().slice(0, 10),
+  );
 }
 
 function signedBusinessDayOffset(from: string, to: string) {
@@ -270,6 +272,85 @@ export function rebaseForecastTasks(tasks: Task[], startDate: string) {
   return shiftForecastTasks(tasks, offset);
 }
 
+export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string) {
+  const normalizedStatusDate = clampToBusinessDay(statusDate);
+  const taskMap = new Map(snapshot.tasks.map((task) => [task.id, { ...task }]));
+  const changedTaskIds: string[] = [];
+
+  for (const sourceTask of snapshot.tasks) {
+    const taskId = sourceTask.id;
+    const task = taskMap.get(taskId);
+
+    if (
+      !task ||
+      !isLeafTask(task) ||
+      task.actualEnd ||
+      task.percentComplete >= 100
+    ) {
+      continue;
+    }
+
+    const forecastEnd = deriveForecastEnd(task);
+
+    if (!forecastEnd || compareIsoDates(forecastEnd, normalizedStatusDate) >= 0) {
+      continue;
+    }
+
+    if (task.type === "milestone") {
+      if (task.actualStart) {
+        continue;
+      }
+
+      taskMap.set(taskId, {
+        ...task,
+        plannedMode: "start_duration",
+        plannedStart: normalizedStatusDate,
+        plannedEnd: null,
+        plannedDurationDays: 0,
+      });
+      changedTaskIds.push(taskId);
+      continue;
+    }
+
+    if (task.actualStart) {
+      const fixedStart = clampToBusinessDay(task.actualStart);
+      const expandedDuration = businessDaysInclusive(fixedStart, normalizedStatusDate);
+
+      taskMap.set(taskId, {
+        ...task,
+        plannedStart: fixedStart,
+        plannedEnd: task.plannedMode === "start_end" ? normalizedStatusDate : null,
+        plannedDurationDays: expandedDuration,
+      });
+      changedTaskIds.push(taskId);
+      continue;
+    }
+
+    const durationDays = deriveForecastDuration(task);
+    taskMap.set(taskId, {
+      ...task,
+      plannedStart: normalizedStatusDate,
+      plannedEnd:
+        task.plannedMode === "start_end"
+          ? addDurationToStart(normalizedStatusDate, Math.max(durationDays, 1))
+          : null,
+      plannedDurationDays: durationDays,
+    });
+    changedTaskIds.push(taskId);
+  }
+
+  if (changedTaskIds.length === 0) {
+    return snapshot.tasks;
+  }
+
+  const correctedTasks = snapshot.tasks.map((task) => taskMap.get(task.id) ?? task);
+  return cascadeForecastFromSeeds(
+    { ...snapshot, tasks: correctedTasks },
+    changedTaskIds,
+    { includeSeeds: true },
+  );
+}
+
 export function cascadeForecastFromSeeds(
   snapshot: Snapshot,
   seedTaskIds: string[],
@@ -292,7 +373,7 @@ export function cascadeForecastFromSeeds(
       continue;
     }
 
-    if (task.actualStart || task.actualEnd) {
+    if (task.actualStart || task.actualEnd || task.percentComplete >= 100) {
       continue;
     }
 
