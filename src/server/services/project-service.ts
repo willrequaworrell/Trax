@@ -1161,7 +1161,7 @@ function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Tas
   } else if ((patch.plannedStart !== undefined && patch.plannedEnd !== undefined) || merged.plannedMode === "start_end") {
     normalized.plannedMode = "start_end";
     if (merged.plannedStart && merged.plannedEnd) {
-      normalized.plannedDurationDays = Math.max(1, merged.plannedDurationDays ?? 1);
+      normalized.plannedDurationDays = businessDaysInclusive(merged.plannedStart, merged.plannedEnd);
     }
   } else if (
     patch.plannedMode === "start_duration" ||

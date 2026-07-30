@@ -82,12 +82,12 @@ function deriveLeafDurationFromSchedule(
     return 0;
   }
 
-  if (plannedDurationDays !== null) {
-    return Math.max(plannedDurationDays, 1);
-  }
-
   if (plannedStart && plannedEnd) {
     return businessDaysInclusive(plannedStart, plannedEnd);
+  }
+
+  if (plannedDurationDays !== null) {
+    return Math.max(plannedDurationDays, 1);
   }
 
   return 1;

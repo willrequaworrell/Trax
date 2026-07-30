@@ -207,6 +207,30 @@ test("weights progress by baseline sizing instead of expanded forecast duration"
   assert.equal(plan.projectPercentComplete, 5);
 });
 
+test("treats an explicit forecast end as authoritative over a stale stored duration", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({
+        id: "prepare-sdd",
+        name: "Prepare SDD",
+        plannedMode: "start_end",
+        plannedStart: "2026-07-01",
+        plannedEnd: "2026-07-31",
+        plannedDurationDays: 22,
+        actualStart: "2026-07-01",
+        percentComplete: 95,
+      }),
+    ],
+    dependencies: [],
+    checkpoints: [],
+  });
+
+  const task = plan.tasks.find((item) => item.id === "prepare-sdd");
+  assert.equal(task?.computedPlannedEnd, "2026-07-31");
+  assert.equal(task?.computedPlannedDurationDays, 23);
+});
+
 test("flags cycles", () => {
     const plan = computeProjectPlan({
       project: makeProject(),

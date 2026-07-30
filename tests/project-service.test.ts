@@ -751,6 +751,29 @@ test("preserves start/end scheduling on task creation", async () => {
   assert.equal(stored?.plannedEnd, "2026-03-20");
 });
 
+test("recomputes duration when an explicit forecast end is edited", async () => {
+  projectService.__testUtils.setNowOverride("2026-07-30T15:00:00.000Z");
+  const existing = makeTask({
+    id: "prepare-sdd",
+    projectId: "project",
+    name: "Prepare SDD",
+    plannedMode: "start_duration",
+    plannedStart: "2026-07-01",
+    plannedDurationDays: 22,
+    actualStart: "2026-07-01",
+    percentComplete: 95,
+  });
+
+  const normalized = projectService.__testUtils.normalizeTaskPatch(existing, {
+    plannedMode: "start_end",
+    plannedStart: "2026-07-01",
+    plannedEnd: "2026-07-31",
+  });
+
+  assert.equal(normalized.plannedEnd, "2026-07-31");
+  assert.equal(normalized.plannedDurationDays, 23);
+});
+
 test("clears planned end for start/duration tasks on creation", async () => {
   const plan = await makeProject("start-duration-create");
   const created = await projectService.createTask(plan.project.id, {
