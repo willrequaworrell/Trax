@@ -550,6 +550,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [actualEndGatePending, setActualEndGatePending] = useState(false);
   const [actualEndGateTaskId, setActualEndGateTaskId] = useState<string | null>(null);
   const [actualEndGateDate, setActualEndGateDate] = useState<string | null>(null);
+  const [dependencyGateOpen, setDependencyGateOpen] = useState(false);
+  const [dependencyGatePending, setDependencyGatePending] = useState(false);
+  const [dependencyGateTaskId, setDependencyGateTaskId] = useState<string | null>(null);
+  const [dependencyGateBlockers, setDependencyGateBlockers] = useState<string[]>([]);
   const [isPending, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
   const undoToastIdsRef = useRef<Set<string>>(new Set());
@@ -557,6 +561,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const baselineGateActionRef = useRef<(() => Promise<void>) | null>(null);
   const actualStartGateActionRef = useRef<((actualStart: string) => Promise<void>) | null>(null);
   const actualEndGateActionRef = useRef<((actualEnd: string) => Promise<void>) | null>(null);
+  const dependencyGateActionRef = useRef<(() => Promise<void>) | null>(null);
 
   const taskMap = useMemo(() => new Map(plan.tasks.map((task) => [task.id, task])), [plan.tasks]);
   const rootTasks = useMemo(
@@ -788,6 +793,32 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     setActualEndGateTaskId(task.id);
     setActualEndGateDate(actualDisplayEnd(task) ?? plannerDisplayEnd(task) ?? isoToday());
     setActualEndGateOpen(true);
+  }
+
+  function dependencyStartBlockers(task: PlannedTask) {
+    return task.blockedBy.flatMap((dependency) => {
+      const predecessor = taskMap.get(dependency.predecessorTaskId);
+
+      if (!predecessor) {
+        return [];
+      }
+
+      const isReady =
+        dependency.type === "FS"
+          ? predecessor.rolledUpStatus === "done"
+          : dependency.type === "SS"
+            ? isExecutionActive(predecessor) || predecessor.rolledUpStatus === "done"
+            : true;
+
+      return isReady ? [] : [predecessor.name];
+    });
+  }
+
+  function openDependencyGate(task: PlannedTask, blockers: string[], action: () => Promise<void>) {
+    dependencyGateActionRef.current = action;
+    setDependencyGateTaskId(task.id);
+    setDependencyGateBlockers(blockers);
+    setDependencyGateOpen(true);
   }
 
   function patchHasExecutionSignal(task: PlannedTask, patch: Record<string, unknown>) {
@@ -1024,6 +1055,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     patch: Record<string, unknown>,
     successMessage?: string,
     callbacks?: { onSuccess?: (nextPlan: ProjectPlan | null) => void; onError?: () => void },
+    options?: { skipDependencyGate?: boolean },
   ) {
     if (!plan.project.baselineCapturedAt && patchHasExecutionSignal(task, patch)) {
       openBaselineGate(
@@ -1039,16 +1071,29 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       return;
     }
 
+    const blockers = dependencyStartBlockers(task);
+    if (
+      !options?.skipDependencyGate &&
+      !isExecutionActive(task) &&
+      patchHasExecutionSignal(task, patch) &&
+      blockers.length > 0
+    ) {
+      openDependencyGate(task, blockers, async () => {
+        await patchTask(task, patch, successMessage, callbacks, { skipDependencyGate: true });
+      });
+      return;
+    }
+
     if (patchNeedsActualStart(task, patch)) {
       openActualStartGate(task, async (actualStart) => {
-        await patchTask(task, { ...patch, actualStart }, successMessage, callbacks);
+        await patchTask(task, { ...patch, actualStart }, successMessage, callbacks, options);
       });
       return;
     }
 
     if (patchNeedsActualEnd(task, patch)) {
       openActualEndGate(task, async (actualEnd) => {
-        await patchTask(task, { ...patch, actualEnd }, successMessage, callbacks);
+        await patchTask(task, { ...patch, actualEnd }, successMessage, callbacks, options);
       });
       return;
     }
@@ -1082,7 +1127,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     }
   }
 
-  async function saveCheckpoint(taskId: string, checkpoint: Checkpoint) {
+  async function saveCheckpoint(taskId: string, checkpoint: Checkpoint, skipDependencyGate = false) {
     const draft = checkpointDraft(checkpoint);
     const parentTask = taskMap.get(taskId);
 
@@ -1119,12 +1164,20 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       return;
     }
 
+    const blockers = dependencyStartBlockers(parentTask);
+    if (!skipDependencyGate && !isExecutionActive(parentTask) && nextPercent > 0 && blockers.length > 0) {
+      openDependencyGate(parentTask, blockers, async () => {
+        await saveCheckpoint(taskId, checkpoint, true);
+      });
+      return;
+    }
+
     if (nextPercent > 0 && !parentTask.actualStart) {
       openActualStartGate(parentTask, async (actualStart) => {
         const updatedPlan = await patchTaskRequest(parentTask, { actualStart });
 
         if (updatedPlan) {
-          await saveCheckpoint(taskId, checkpoint);
+          await saveCheckpoint(taskId, checkpoint, true);
         }
       });
       return;
@@ -1142,6 +1195,27 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     }
 
     await saveCheckpointRequest(taskId, checkpoint, draft);
+  }
+
+  async function restoreBaselineDuration(task: PlannedTask) {
+    const baselineDuration = task.baselinePlannedDurationDays;
+    const forecastStart = plannerDisplayStart(task);
+
+    if (baselineDuration === null || !forecastStart || task.type !== "task") {
+      toast.error("This task does not have a baseline duration to restore.");
+      return;
+    }
+
+    await patchTask(
+      task,
+      {
+        plannedMode: "start_duration",
+        plannedStart: forecastStart,
+        plannedEnd: null,
+        plannedDurationDays: Math.max(baselineDuration, 1),
+      },
+      "Baseline duration restored",
+    );
   }
 
   async function saveCheckpointRequest(taskId: string, checkpoint: Checkpoint, draft: CheckpointDraft) {
@@ -1815,7 +1889,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             ) : (
               <>
                 {task.type === "task" ? (
-                  <DropdownMenuItem onClick={() => void createCheckpointForTask(task)}>Add checkpoint</DropdownMenuItem>
+                  <>
+                    <DropdownMenuItem onClick={() => void createCheckpointForTask(task)}>Add checkpoint</DropdownMenuItem>
+                    {task.baselinePlannedDurationDays !== null ? (
+                      <DropdownMenuItem onClick={() => void restoreBaselineDuration(task)}>
+                        Restore baseline duration
+                      </DropdownMenuItem>
+                    ) : null}
+                  </>
                 ) : null}
                 <DropdownMenuItem onClick={() => void wrapTask(task)}>Wrap in section</DropdownMenuItem>
               </>
@@ -2827,6 +2908,80 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             >
               {baselineGatePending ? <Spinner /> : null}
               Freeze baseline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={dependencyGateOpen}
+        onOpenChange={(open) => {
+          setDependencyGateOpen(open);
+
+          if (!open) {
+            dependencyGateActionRef.current = null;
+            setDependencyGateTaskId(null);
+            setDependencyGateBlockers([]);
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Start before dependency is ready?</DialogTitle>
+            <DialogDescription>
+              {dependencyGateTaskId ? taskMap.get(dependencyGateTaskId)?.name ?? "This task" : "This task"} has an
+              unfinished dependency. You can continue if work has actually started, but Traxly will record a dependency variance.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-3">
+            <p className="text-sm font-medium">Waiting on:</p>
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              {dependencyGateBlockers.map((blocker) => (
+                <li key={blocker}>{blocker}</li>
+              ))}
+            </ul>
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDependencyGateOpen(false);
+                dependencyGateActionRef.current = null;
+                setDependencyGateTaskId(null);
+                setDependencyGateBlockers([]);
+              }}
+              disabled={dependencyGatePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const action = dependencyGateActionRef.current;
+
+                if (!action) {
+                  return;
+                }
+
+                startTransition(async () => {
+                  setDependencyGatePending(true);
+
+                  try {
+                    await action();
+                    setDependencyGateOpen(false);
+                    dependencyGateActionRef.current = null;
+                    setDependencyGateTaskId(null);
+                    setDependencyGateBlockers([]);
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Failed to record progress.");
+                  } finally {
+                    setDependencyGatePending(false);
+                  }
+                });
+              }}
+              disabled={dependencyGatePending}
+            >
+              {dependencyGatePending ? <Spinner /> : null}
+              Continue anyway
             </Button>
           </DialogFooter>
         </DialogContent>

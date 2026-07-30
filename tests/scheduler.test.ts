@@ -92,6 +92,38 @@ test("supports start-to-start dependencies", () => {
     assert.equal(taskB?.computedPlannedStart, "2026-03-16");
   });
 
+test("flags actual execution that starts before a finish-to-start dependency is complete", () => {
+  const plan = computeProjectPlan({
+    project: makeProject(),
+    tasks: [
+      makeTask({
+        id: "prepare",
+        name: "Prepare SDD",
+        actualStart: "2026-03-16",
+        percentComplete: 95,
+      }),
+      makeTask({
+        id: "review",
+        name: "Review SDD with Customer",
+        actualStart: "2026-03-17",
+        percentComplete: 25,
+      }),
+    ],
+    dependencies: [
+      makeDependency({ id: "dep_1", predecessorTaskId: "prepare", successorTaskId: "review", type: "FS" }),
+    ],
+    checkpoints: [],
+  });
+
+  const review = plan.tasks.find((task) => task.id === "review");
+  assert.equal(
+    review?.issues.some(
+      (issue) => issue.id === "actual-dependency-conflict-dep_1" && issue.message.includes("Prepare SDD"),
+    ),
+    true,
+  );
+});
+
 test("supports lag offsets", () => {
     const plan = computeProjectPlan({
       project: makeProject(),

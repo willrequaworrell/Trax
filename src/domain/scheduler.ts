@@ -3,6 +3,7 @@ import {
   businessDayShiftGap,
   businessDaysInclusive,
   clampToBusinessDay,
+  compareIsoDates,
   finishToStartSuccessorDate,
   isoToday,
   maxIsoDate,
@@ -315,6 +316,29 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
           ),
         );
         continue;
+      }
+
+      const predecessorActualStart = predecessor.actualStart ?? predecessor.actualEnd;
+      const dependencyConflict =
+        dependency.type === "FS" && task.actualStart
+          ? !predecessor.actualEnd || compareIsoDates(task.actualStart, predecessor.actualEnd) < 0
+          : dependency.type === "SS" && task.actualStart
+            ? !predecessorActualStart || compareIsoDates(task.actualStart, predecessorActualStart) < 0
+            : dependency.type === "FF" && task.actualEnd
+              ? !predecessor.actualEnd || compareIsoDates(task.actualEnd, predecessor.actualEnd) < 0
+              : dependency.type === "SF" && task.actualEnd
+                ? !predecessorActualStart || compareIsoDates(task.actualEnd, predecessorActualStart) < 0
+                : false;
+
+      if (dependencyConflict) {
+        taskIssues.push(
+          makeIssue(
+            `actual-dependency-conflict-${dependency.id}`,
+            `${task.name} execution occurred before dependency ${predecessor.name} satisfied its ${dependency.type} constraint.`,
+            "warning",
+            task.id,
+          ),
+        );
       }
 
       switch (dependency.type) {
