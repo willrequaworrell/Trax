@@ -46,6 +46,7 @@ import { toCheckpointInsert, toDependencyInsert, toPendingDeleteActionInsert, to
 import { projectRepository } from "@/server/repositories/project-repository";
 import {
   cascadeForecastFromSeeds,
+  reflowDownstreamForecast,
   rebaseForecastTasks,
   reconcileOverdueForecast,
 } from "@/server/services/forecast-schedule";
@@ -522,6 +523,25 @@ export async function rebaseProjectForecast(projectId: string, startDate: string
   const nextTasks = rebaseForecastTasks(snapshot.tasks, startDate);
   await persistForecastChanges(projectId, nextTasks);
   return getProjectPlan(projectId);
+}
+
+export async function reflowTaskDownstream(taskId: string) {
+  const task = await projectRepository.getTask(taskId);
+
+  if (!task || task.type === "summary") {
+    return null;
+  }
+
+  const snapshot = await projectRepository.getProjectSnapshot(task.projectId, now());
+
+  if (!snapshot) {
+    return null;
+  }
+
+  assertProjectTreeIsValid(task.projectId, snapshot.tasks);
+  const nextTasks = reflowDownstreamForecast(snapshot, taskId);
+  await persistForecastChanges(task.projectId, nextTasks, snapshot);
+  return getProjectPlan(task.projectId);
 }
 
 export async function freezeProjectBaseline(projectId: string) {

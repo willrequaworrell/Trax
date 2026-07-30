@@ -554,6 +554,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [dependencyGatePending, setDependencyGatePending] = useState(false);
   const [dependencyGateTaskId, setDependencyGateTaskId] = useState<string | null>(null);
   const [dependencyGateBlockers, setDependencyGateBlockers] = useState<string[]>([]);
+  const [reflowOpen, setReflowOpen] = useState(false);
+  const [reflowPending, setReflowPending] = useState(false);
+  const [reflowTaskId, setReflowTaskId] = useState<string | null>(null);
+  const [reflowTaskCount, setReflowTaskCount] = useState(0);
   const [isPending, startTransition] = useTransition();
   const ganttViewportRef = useRef<HTMLDivElement | null>(null);
   const undoToastIdsRef = useRef<Set<string>>(new Set());
@@ -1216,6 +1220,62 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       },
       "Baseline duration restored",
     );
+  }
+
+  function openReflowDialog(task: PlannedTask) {
+    const visited = new Set<string>();
+    const stack = task.blocking.map((dependency) => dependency.successorTaskId);
+
+    while (stack.length > 0) {
+      const taskId = stack.pop();
+
+      if (!taskId || visited.has(taskId)) {
+        continue;
+      }
+
+      visited.add(taskId);
+      const descendant = taskMap.get(taskId);
+
+      for (const dependency of descendant?.blocking ?? []) {
+        stack.push(dependency.successorTaskId);
+      }
+    }
+
+    const changeableCount = [...visited].filter((taskId) => {
+      const descendant = taskMap.get(taskId);
+      return Boolean(
+        descendant &&
+        !descendant.isSummary &&
+        !descendant.actualStart &&
+        !descendant.actualEnd &&
+        descendant.percentComplete === 0,
+      );
+    }).length;
+
+    setReflowTaskId(task.id);
+    setReflowTaskCount(changeableCount);
+    setReflowOpen(true);
+  }
+
+  async function reflowDownstream(taskId: string) {
+    setReflowPending(true);
+
+    try {
+      const nextPlan = await requestPlan(`/api/tasks/${taskId}/reflow`, { method: "POST" });
+
+      if (nextPlan) {
+        applyPlan(nextPlan);
+        toast.success("Downstream schedule reflowed");
+      }
+
+      setReflowOpen(false);
+      setReflowTaskId(null);
+      setReflowTaskCount(0);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to reflow downstream schedule.");
+    } finally {
+      setReflowPending(false);
+    }
   }
 
   async function saveCheckpointRequest(taskId: string, checkpoint: Checkpoint, draft: CheckpointDraft) {
@@ -1897,6 +1957,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                       </DropdownMenuItem>
                     ) : null}
                   </>
+                ) : null}
+                {task.blocking.length > 0 ? (
+                  <DropdownMenuItem onClick={() => openReflowDialog(task)}>
+                    Reflow downstream schedule
+                  </DropdownMenuItem>
                 ) : null}
                 <DropdownMenuItem onClick={() => void wrapTask(task)}>Wrap in section</DropdownMenuItem>
               </>
@@ -2908,6 +2973,47 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             >
               {baselineGatePending ? <Spinner /> : null}
               Freeze baseline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={reflowOpen}
+        onOpenChange={(open) => {
+          setReflowOpen(open);
+
+          if (!open) {
+            setReflowTaskId(null);
+            setReflowTaskCount(0);
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Reflow downstream schedule?</DialogTitle>
+            <DialogDescription>
+              Manual forecast dates and durations for {reflowTaskCount} unstarted downstream {reflowTaskCount === 1 ? "task" : "tasks"} will
+              be replaced using baseline durations and dependency timing. Baseline and actual execution will not change.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-2 text-sm text-muted-foreground">
+            <p>Started and completed tasks remain fixed boundaries. Tasks without baseline sizing keep their current forecast duration.</p>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReflowOpen(false)} disabled={reflowPending}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (reflowTaskId) {
+                  void reflowDownstream(reflowTaskId);
+                }
+              }}
+              disabled={reflowPending || !reflowTaskId || reflowTaskCount === 0}
+            >
+              {reflowPending ? <Spinner /> : null}
+              Reflow schedule
             </Button>
           </DialogFooter>
         </DialogContent>

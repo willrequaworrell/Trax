@@ -351,6 +351,105 @@ export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string)
   );
 }
 
+function deriveReflowDuration(task: Task) {
+  if (task.type === "milestone") {
+    return 0;
+  }
+
+  if (task.baselinePlannedDurationDays !== null) {
+    return Math.max(task.baselinePlannedDurationDays, 1);
+  }
+
+  if (task.baselinePlannedStart && task.baselinePlannedEnd) {
+    return businessDaysInclusive(task.baselinePlannedStart, task.baselinePlannedEnd);
+  }
+
+  return deriveForecastDuration(task);
+}
+
+export function reflowDownstreamForecast(snapshot: Snapshot, anchorTaskId: string) {
+  const affectedIds = collectSuccessorClosure(snapshot.dependencies, [anchorTaskId]);
+
+  if (affectedIds.size === 0) {
+    return snapshot.tasks;
+  }
+
+  const order = topologicalLeafOrder(snapshot.tasks, snapshot.dependencies).filter((taskId) => affectedIds.has(taskId));
+
+  if (order.length !== affectedIds.size) {
+    throw new ValidationError("Downstream forecast could not be reflowed because the affected dependencies contain a cycle.");
+  }
+
+  const taskMap = new Map(snapshot.tasks.map((task) => [task.id, { ...task }]));
+  const { bySuccessor } = buildDependencyIndex(snapshot.dependencies);
+
+  for (const taskId of order) {
+    const task = taskMap.get(taskId);
+
+    if (!task || !isLeafTask(task) || task.actualStart || task.actualEnd || task.percentComplete > 0) {
+      continue;
+    }
+
+    const durationDays = deriveReflowDuration(task);
+    let requiredStart: string | null = null;
+    let requiredEnd: string | null = null;
+
+    for (const dependency of bySuccessor.get(taskId) ?? []) {
+      const predecessor = taskMap.get(dependency.predecessorTaskId);
+
+      if (!predecessor || predecessor.type === "summary") {
+        throw new ValidationError(`Downstream forecast could not schedule ${task.name} because a predecessor is missing.`);
+      }
+
+      const predecessorStart = deriveForecastStart(predecessor);
+      const predecessorEnd = deriveForecastEnd(predecessor);
+
+      switch (dependency.type) {
+        case "FS":
+          if (predecessorEnd) {
+            requiredStart = maxIsoDate([requiredStart, finishToStartSuccessorDate(predecessorEnd, dependency.lagDays)]);
+          }
+          break;
+        case "SS":
+          if (predecessorStart) {
+            requiredStart = maxIsoDate([requiredStart, shiftBusinessDays(predecessorStart, dependency.lagDays)]);
+          }
+          break;
+        case "FF":
+          if (predecessorEnd) {
+            requiredEnd = maxIsoDate([requiredEnd, shiftBusinessDays(predecessorEnd, dependency.lagDays)]);
+          }
+          break;
+        case "SF":
+          if (predecessorStart) {
+            requiredEnd = maxIsoDate([requiredEnd, shiftBusinessDays(predecessorStart, dependency.lagDays)]);
+          }
+          break;
+      }
+    }
+
+    const earliestByEnd =
+      requiredEnd && durationDays > 0
+        ? shiftBusinessDays(requiredEnd, -(durationDays - 1))
+        : requiredEnd;
+    const nextStart = maxIsoDate([requiredStart, earliestByEnd]);
+
+    if (!nextStart) {
+      throw new ValidationError(`Downstream forecast could not schedule ${task.name} from its dependencies.`);
+    }
+
+    taskMap.set(taskId, {
+      ...task,
+      plannedMode: "start_duration",
+      plannedStart: clampToBusinessDay(nextStart),
+      plannedEnd: null,
+      plannedDurationDays: durationDays,
+    });
+  }
+
+  return snapshot.tasks.map((task) => taskMap.get(task.id) ?? task);
+}
+
 export function cascadeForecastFromSeeds(
   snapshot: Snapshot,
   seedTaskIds: string[],

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Dependency, Task } from "@/domain/planner";
-import { reconcileOverdueForecast } from "@/server/services/forecast-schedule";
+import { reconcileOverdueForecast, reflowDownstreamForecast } from "@/server/services/forecast-schedule";
 
 function makeTask(overrides: Partial<Task> & Pick<Task, "id">): Task {
   return {
@@ -102,3 +102,80 @@ test("handles completion, milestones, and weekend status dates", () => {
   assert.equal(byId.get("started-milestone")?.plannedStart, "2026-07-01");
 });
 
+test("reflows unstarted descendants with baseline durations and preserves execution boundaries", () => {
+  const tasks = [
+    makeTask({
+      id: "anchor",
+      plannedMode: "start_end",
+      plannedStart: "2026-08-03",
+      plannedEnd: "2026-08-03",
+      plannedDurationDays: 1,
+    }),
+    makeTask({
+      id: "review",
+      plannedMode: "start_end",
+      plannedStart: "2026-08-03",
+      plannedEnd: "2026-08-17",
+      plannedDurationDays: 11,
+      baselinePlannedStart: "2026-07-01",
+      baselinePlannedEnd: "2026-07-01",
+      baselinePlannedDurationDays: 1,
+    }),
+    makeTask({
+      id: "next",
+      plannedStart: "2026-08-18",
+      plannedDurationDays: 6,
+      baselinePlannedStart: "2026-07-02",
+      baselinePlannedDurationDays: 2,
+    }),
+    makeTask({
+      id: "started-boundary",
+      plannedStart: "2026-07-21",
+      plannedDurationDays: 8,
+      baselinePlannedDurationDays: 1,
+      actualStart: "2026-07-21",
+      percentComplete: 25,
+      status: "in_progress",
+    }),
+    makeTask({
+      id: "after-boundary",
+      plannedStart: "2026-08-20",
+      plannedDurationDays: 4,
+      baselinePlannedDurationDays: 1,
+    }),
+    makeTask({ id: "unrelated", plannedStart: "2026-09-01", plannedDurationDays: 3 }),
+  ];
+  const dependencies = [
+    fsDependency("anchor", "review"),
+    fsDependency("review", "next"),
+    fsDependency("anchor", "started-boundary"),
+    fsDependency("started-boundary", "after-boundary"),
+  ];
+
+  const reflowed = reflowDownstreamForecast({ tasks, dependencies }, "anchor");
+  const byId = new Map(reflowed.map((task) => [task.id, task]));
+
+  assert.equal(byId.get("review")?.plannedStart, "2026-08-04");
+  assert.equal(byId.get("review")?.plannedDurationDays, 1);
+  assert.equal(byId.get("next")?.plannedStart, "2026-08-05");
+  assert.equal(byId.get("next")?.plannedDurationDays, 2);
+  assert.equal(byId.get("started-boundary")?.plannedStart, "2026-07-21");
+  assert.equal(byId.get("started-boundary")?.plannedDurationDays, 8);
+  assert.equal(byId.get("after-boundary")?.plannedStart, "2026-07-31");
+  assert.equal(byId.get("after-boundary")?.plannedDurationDays, 1);
+  assert.equal(byId.get("unrelated")?.plannedStart, "2026-09-01");
+});
+
+test("rejects downstream reflow when the affected dependency graph contains a cycle", () => {
+  const tasks = [makeTask({ id: "anchor" }), makeTask({ id: "a" }), makeTask({ id: "b" })];
+  const dependencies = [
+    fsDependency("anchor", "a"),
+    fsDependency("a", "b"),
+    fsDependency("b", "a"),
+  ];
+
+  assert.throws(
+    () => reflowDownstreamForecast({ tasks, dependencies }, "anchor"),
+    /contain a cycle/,
+  );
+});
