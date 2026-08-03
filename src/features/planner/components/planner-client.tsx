@@ -48,7 +48,6 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuRoot,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { InputGroup, InputGroupAddon, InputGroupField } from "@/components/ui/input-group";
@@ -1558,37 +1557,35 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     });
   }
 
-  function exportFilename(formatMode: "markdown" | "json") {
+  function exportFilename() {
     const slug = plan.project.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "project";
 
-    return `${slug}-export.${formatMode === "markdown" ? "md" : "json"}`;
+    return `${slug}-export.json`;
   }
 
-  async function downloadExport(formatMode: "markdown" | "json") {
+  async function downloadExport() {
     try {
-      const response = await fetch(`/api/projects/${plan.project.id}/export?format=${formatMode}`);
+      const response = await fetch(`/api/projects/${plan.project.id}/export?format=json`);
 
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.error ?? "Failed to load export.");
       }
 
-      const content = formatMode === "markdown" ? await response.text() : JSON.stringify(await response.json(), null, 2);
-      const blob = new Blob([content], {
-        type: formatMode === "markdown" ? "text/markdown;charset=utf-8" : "application/json;charset=utf-8",
-      });
+      const content = JSON.stringify(await response.json(), null, 2);
+      const blob = new Blob([content], { type: "application/json;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = exportFilename(formatMode);
+      link.download = exportFilename();
       document.body.appendChild(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      toast.success(`${formatMode === "markdown" ? "Markdown" : "JSON"} export downloaded`);
+      toast.success("JSON export downloaded");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to download export.");
     }
@@ -2660,6 +2657,21 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               <div>
                 <div className="flex items-center gap-3">
                   <h1 className="text-3xl font-semibold tracking-tight">{plan.project.name}</h1>
+                  <TooltipProvider>
+                    <TooltipRoot>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label="Download JSON export"
+                          onClick={() => void downloadExport()}
+                        >
+                          <DownloadSimple />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Download JSON export</TooltipContent>
+                    </TooltipRoot>
+                  </TooltipProvider>
                   <DropdownMenuRoot>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon-xs" aria-label="Project actions">
@@ -2674,15 +2686,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                       <DropdownMenuItem onClick={() => setRenameOpen(true)}>
                         <PencilSimple />
                         Rename
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => void downloadExport("markdown")}>
-                        <DownloadSimple />
-                        Download Markdown export
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => void downloadExport("json")}>
-                        <DownloadSimple />
-                        Download JSON snapshot
                       </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenuRoot>

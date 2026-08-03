@@ -73,8 +73,9 @@ export function DatePickerField({
           </Button>
         ) : null}
       </div>
-      <PopoverContent className="w-auto p-0">
+      <PopoverContent className="w-auto overflow-hidden p-0">
         <Calendar
+          className="rounded-none border-0"
           mode="single"
           defaultMonth={selected}
           selected={selected}
@@ -83,6 +84,20 @@ export function DatePickerField({
             handleOpenChange(false);
           }}
         />
+        <div className="border-t border-border/70 p-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-full rounded-lg"
+            onClick={() => {
+              onChange(format(new Date(), "yyyy-MM-dd"));
+              handleOpenChange(false);
+            }}
+          >
+            Today
+          </Button>
+        </div>
       </PopoverContent>
     </PopoverRoot>
   );
