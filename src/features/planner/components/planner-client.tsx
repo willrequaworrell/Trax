@@ -2657,21 +2657,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               <div>
                 <div className="flex items-center gap-3">
                   <h1 className="text-3xl font-semibold tracking-tight">{plan.project.name}</h1>
-                  <TooltipProvider>
-                    <TooltipRoot>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label="Download JSON export"
-                          onClick={() => void downloadExport()}
-                        >
-                          <DownloadSimple />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Download JSON export</TooltipContent>
-                    </TooltipRoot>
-                  </TooltipProvider>
                   <DropdownMenuRoot>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon-xs" aria-label="Project actions">
@@ -2687,9 +2672,23 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                         <PencilSimple />
                         Rename
                       </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenuRoot>
-                  {plan.issues.length > 0 ? <Badge variant="warning">{plan.issues.length} issues</Badge> : null}
+                    </DropdownMenuContent>
+                  </DropdownMenuRoot>
+                  <TooltipProvider>
+                    <TooltipRoot>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label="Download JSON export"
+                          onClick={() => void downloadExport()}
+                        >
+                          <DownloadSimple />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Download JSON export</TooltipContent>
+                    </TooltipRoot>
+                  </TooltipProvider>
                 </div>
                 <div className="mt-3 flex items-center gap-3">
                   <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
