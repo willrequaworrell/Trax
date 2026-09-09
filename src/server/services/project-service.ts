@@ -253,6 +253,10 @@ async function reconcileProjectForecast(projectId: string) {
   }
 
   assertProjectTreeIsValid(projectId, snapshot.tasks);
+  if (!snapshot.project.baselineCapturedAt) {
+    return snapshot;
+  }
+
   const nextTasks = reconcileOverdueForecast(snapshot, planningStatusDate(currentTime));
   const changed = await persistForecastChanges(projectId, nextTasks, snapshot);
 

@@ -1571,7 +1571,7 @@ test("plan reads persist overdue corrections, cascade successors, and are same-d
   assert.equal(secondProject?.updatedAt, "2026-07-10T15:00:00.000Z");
 });
 
-test("freeze baseline reconciles an overdue forecast before capturing it", async () => {
+test("first baseline capture preserves overdue draft dates in the baseline before activating forecast reconciliation", async () => {
   projectService.__testUtils.setNowOverride("2026-07-01T15:00:00.000Z");
   const plan = await makeProject("freeze-overdue-forecast");
   const task = await projectService.createTask(plan.project.id, {
@@ -1586,7 +1586,7 @@ test("freeze baseline reconciles an overdue forecast before capturing it", async
   const stored = await projectRepository.getTask(task!.taskId);
 
   assert.equal(stored?.plannedStart, "2026-07-10");
-  assert.equal(stored?.baselinePlannedStart, "2026-07-10");
+  assert.equal(stored?.baselinePlannedStart, "2026-07-01");
   assert.equal(stored?.baselinePlannedDurationDays, 3);
 });
 
@@ -1691,6 +1691,27 @@ test("rebase shifts forecast while preserving baseline and actuals", async () =>
   assert.equal(stored?.baselinePlannedStart, "2026-03-16");
   assert.equal(stored?.actualStart, "2026-03-17");
   assert.equal(stored?.percentComplete, 50);
+});
+
+test("unbaselined projects preserve past forecast dates when read after rebase", async () => {
+  projectService.__testUtils.setNowOverride("2026-09-09T15:00:00.000Z");
+  const plan = await makeProject("unbaselined-past-rebase");
+  const created = await projectService.createTask(plan.project.id, {
+    name: "Kickoff",
+    type: "milestone",
+    plannedStart: "2026-09-09",
+    plannedDurationDays: 0,
+  });
+
+  await projectService.rebaseProjectForecast(plan.project.id, "2026-09-02");
+
+  const storedAfterRebase = await projectRepository.getTask(created!.taskId);
+  const readPlan = await projectService.getProjectPlan(plan.project.id);
+  const storedAfterRead = await projectRepository.getTask(created!.taskId);
+
+  assert.equal(storedAfterRebase?.plannedStart, "2026-09-02");
+  assert.equal(readPlan?.tasks.find((task) => task.id === created!.taskId)?.plannedStart, "2026-09-02");
+  assert.equal(storedAfterRead?.plannedStart, "2026-09-02");
 });
 
 test("duplicate with start date shifts forecast and resets actuals and baseline", async () => {
