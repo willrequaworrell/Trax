@@ -60,6 +60,7 @@ import {
 import { PopoverContent, PopoverRoot, PopoverTrigger } from "@/components/ui/popover";
 import { SliderRange, SliderRoot, SliderThumb, SliderTrack } from "@/components/ui/slider";
 import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { TooltipContent, TooltipProvider, TooltipRoot, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -461,11 +462,12 @@ function ganttPercentLabelOutsideStyle(leftPercent: number) {
 }
 
 function ProgressPill({ value, compact = false }: { value: number; compact?: boolean }) {
+  const isComplete = value >= 100;
   return (
     <div className={cn("min-w-0 space-y-1", compact && "space-y-1.5")}>
       <div className="h-2 overflow-hidden rounded-full bg-muted">
         <div
-          className="h-full rounded-full bg-chart-1 transition-[width]"
+          className={cn("h-full rounded-full transition-[width]", isComplete ? "bg-emerald-700/60" : "bg-chart-1")}
           style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
         />
       </div>
@@ -475,11 +477,12 @@ function ProgressPill({ value, compact = false }: { value: number; compact?: boo
 }
 
 function CheckpointProgressPill({ value }: { value: number }) {
+  const isComplete = value >= 100;
   return (
     <div className="min-w-0 space-y-1">
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         <div
-          className="h-full rounded-full bg-chart-1 transition-[width]"
+          className={cn("h-full rounded-full transition-[width]", isComplete ? "bg-emerald-700/60" : "bg-chart-1")}
           style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
         />
       </div>
@@ -527,6 +530,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     checkpointId: string;
     field: CheckpointEditableField;
   } | null>(null);
+  const [checkpointEdit, setCheckpointEdit] = useState<{ taskId: string; checkpointId: string } | null>(null);
   const [progressDrafts, setProgressDrafts] = useState<Record<string, string>>({});
   const [checkpointDrafts, setCheckpointDrafts] = useState<Record<string, CheckpointDraft>>({});
   const [pendingTaskIds, setPendingTaskIds] = useState<Record<string, boolean>>({});
@@ -985,8 +989,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   function cellButtonClass(taskId: string, field: EditableField) {
     return cn(
       "group w-full cursor-pointer rounded-2xl px-2 py-2 text-left transition",
-      "hover:bg-muted/45 hover:ring-1 hover:ring-border/70",
-      isCellActive(taskId, field) && "bg-muted/55 ring-1 ring-border/70",
+      "hover:bg-muted/70 hover:ring-1 hover:ring-border/70",
+      isCellActive(taskId, field) && "bg-muted/75 ring-1 ring-border/70",
     );
   }
 
@@ -997,8 +1001,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   function checkpointCellButtonClass(checkpointId: string, field: CheckpointEditableField) {
     return cn(
       "group w-full cursor-pointer rounded-2xl px-2 py-2 text-left transition",
-      "hover:bg-muted/45 hover:ring-1 hover:ring-border/70",
-      isCheckpointCellActive(checkpointId, field) && "bg-muted/55 ring-1 ring-border/70",
+      "hover:bg-foreground/10 hover:ring-1 hover:ring-border/70",
+      isCheckpointCellActive(checkpointId, field) && "bg-foreground/12 ring-1 ring-border/70",
     );
   }
 
@@ -2013,6 +2017,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 className={cn(
                   "group relative grid items-center gap-3 overflow-hidden border-t border-border/40 px-4 py-2 transition-colors md:grid-cols-[minmax(220px,1.9fr)_144px_104px_auto]",
                   depthTintClass(depth, "checkpoint"),
+                  "hover:bg-foreground/10",
+                  (activeCheckpointCell?.checkpointId === checkpoint.id || checkpointEdit?.checkpointId === checkpoint.id) &&
+                    "bg-foreground/12 hover:bg-foreground/12",
                 )}
               >
                 <div className="relative min-w-0">
@@ -2041,7 +2048,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                     <button
                       className={cn(checkpointCellButtonClass(checkpoint.id, "name"), "py-1.5 text-sm")}
                       style={{ paddingLeft: `${depth * LIST_DEPTH_INDENT + 48}px` }}
-                      onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "name" })}
+                      title={draft.name}
+                      onClick={() => {
+                        setActiveCheckpointCell(null);
+                        setCheckpointEdit({ taskId: task.id, checkpointId: checkpoint.id });
+                      }}
                       disabled={isPending}
                     >
                       <span className="block truncate font-medium">{draft.name}</span>
@@ -2064,7 +2075,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                       }}
                     >
                       <PopoverTrigger asChild>
-                        <button className={cn(checkpointCellButtonClass(checkpoint.id, "progress"), "py-1")} disabled={isPending}>
+                        <button className={cn(checkpointCellButtonClass(checkpoint.id, "progress"), "py-1")} title={`${percentComplete}% complete`} disabled={isPending}>
                           <CheckpointProgressPill value={Number.isFinite(percentComplete) ? percentComplete : checkpoint.percentComplete} />
                         </button>
                       </PopoverTrigger>
@@ -2102,6 +2113,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   ) : (
                     <button
                       className={cn(checkpointCellButtonClass(checkpoint.id, "progress"), "py-1")}
+                      title={`${Number.isFinite(percentComplete) ? percentComplete : checkpoint.percentComplete}% complete`}
                       onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "progress" })}
                       disabled={isPending}
                     >
@@ -2127,6 +2139,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                       <PopoverTrigger asChild>
                         <button
                           className={cn(checkpointCellButtonClass(checkpoint.id, "weight"), "py-1 text-sm text-muted-foreground")}
+                          title={`${Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints} points`}
                           disabled={isPending}
                         >
                           <span>{Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints} pts</span>
@@ -2172,6 +2185,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   ) : (
                     <button
                       className={cn(checkpointCellButtonClass(checkpoint.id, "weight"), "py-1 text-sm text-muted-foreground")}
+                      title={`${Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints} points`}
                       onClick={() => setActiveCheckpointCell({ checkpointId: checkpoint.id, field: "weight" })}
                       disabled={isPending}
                     >
@@ -2242,6 +2256,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
           "group relative grid items-center overflow-hidden border-b border-border/60 px-4 py-2 transition-colors",
           LIST_GRID_CLASS,
           depthTintClass(depth, "task"),
+          (activeCell?.taskId === task.id || dialogState.taskId === task.id) && "bg-muted/70",
           hasExpandableContent ? "cursor-pointer" : "cursor-default",
         )}
         onClick={hasExpandableContent ? () => void toggleTask(task.id) : undefined}
@@ -2275,6 +2290,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   "cursor-pointer truncate text-left font-medium transition hover:text-primary",
                   isSummaryRow && "uppercase tracking-wide",
                 )}
+                title={task.name}
                 onClick={(event) => {
                   event.stopPropagation();
                   if (hasExpandableContent) {
@@ -2303,10 +2319,12 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               ) : null}
             </div>
             {task.type === "summary" ? (
-              task.notes ? <p className="truncate text-xs text-muted-foreground">{task.notes}</p> : null
+              task.notes ? <p className="truncate text-xs text-muted-foreground" title={task.notes}>{task.notes}</p> : null
             ) : (
               <>
-                <p className="truncate text-xs text-muted-foreground">{task.notes || `${task.rolledUpEffortDays} business day effort`}</p>
+                <p className="truncate text-xs text-muted-foreground" title={task.notes || `${task.rolledUpEffortDays} business day effort`}>
+                  {task.notes || `${task.rolledUpEffortDays} business day effort`}
+                </p>
               </>
             )}
           </div>
@@ -2626,6 +2644,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   }
 
   const selectedTask = dialogState.taskId ? taskMap.get(dialogState.taskId) ?? null : null;
+  const checkpointEditTask = checkpointEdit ? taskMap.get(checkpointEdit.taskId) ?? null : null;
+  const checkpointEditItem = checkpointEditTask?.checkpoints.find((item) => item.id === checkpointEdit?.checkpointId) ?? null;
   const hasTasks = rootTasks.length > 0;
   const canZoomOut = ganttColumnWidth - GANTT_ZOOM_STEP >= minGanttColumnWidth - 0.1;
   const canZoomIn = ganttColumnWidth + GANTT_ZOOM_STEP <= GANTT_MAX_COLUMN_WIDTH + 0.1;
@@ -3230,6 +3250,53 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             >
               {actualEndGatePending ? <Spinner /> : null}
               Save actual end
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
+      <DialogRoot
+        open={Boolean(checkpointEdit && checkpointEditItem)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCheckpointEdit(null);
+            setActiveCheckpointCell(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit checkpoint</DialogTitle>
+            <DialogDescription>Review and update the checkpoint description. Press Escape or Cancel to discard changes.</DialogDescription>
+          </DialogHeader>
+          {checkpointEditItem && checkpointEditTask ? (
+            <DialogBody className="space-y-3">
+              <label className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground" htmlFor="checkpoint-description">
+                Description
+              </label>
+              <Textarea
+                id="checkpoint-description"
+                value={checkpointDraft(checkpointEditItem).name}
+                onChange={(event) => setCheckpointDraft(checkpointEditItem.id, { name: event.target.value })}
+                autoFocus
+                className="min-h-32 text-base"
+              />
+            </DialogBody>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCheckpointEdit(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!checkpointEditItem || !checkpointEditTask || !checkpointDraft(checkpointEditItem).name.trim()}
+              onClick={() => {
+                if (checkpointEditItem && checkpointEditTask) {
+                  setCheckpointEdit(null);
+                  void saveCheckpoint(checkpointEditTask.id, checkpointEditItem);
+                }
+              }}
+            >
+              Save checkpoint
             </Button>
           </DialogFooter>
         </DialogContent>
