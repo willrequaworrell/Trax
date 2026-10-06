@@ -51,12 +51,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { InputGroup, InputGroupAddon, InputGroupField } from "@/components/ui/input-group";
-import {
-  NavigationMenuItem,
-  NavigationMenuList,
-  NavigationMenuRoot,
-  NavigationMenuTrigger,
-} from "@/components/ui/navigation-menu";
 import { PopoverContent, PopoverRoot, PopoverTrigger } from "@/components/ui/popover";
 import { SliderRange, SliderRoot, SliderThumb, SliderTrack } from "@/components/ui/slider";
 import { Spinner } from "@/components/ui/spinner";
@@ -1001,8 +995,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   function checkpointCellButtonClass(checkpointId: string, field: CheckpointEditableField) {
     return cn(
       "group w-full cursor-pointer rounded-2xl px-2 py-2 text-left transition",
-      "hover:bg-foreground/10 hover:ring-1 hover:ring-border/70",
-      isCheckpointCellActive(checkpointId, field) && "bg-foreground/12 ring-1 ring-border/70",
+      "hover:bg-foreground/3 hover:ring-1 hover:ring-border/40",
+      isCheckpointCellActive(checkpointId, field) && "bg-foreground/4 ring-1 ring-border/40",
     );
   }
 
@@ -2671,12 +2665,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       <WorkspaceSidebar projects={projects} activeProjectId={plan.project.id} />
 
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <header className="shrink-0 border-b border-border/70 bg-background/95 px-8 pt-6 pb-4 backdrop-blur">
-          <div className="flex flex-col gap-5">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-              <div>
-                <div className="flex items-center gap-3">
-                  <h1 className="text-3xl font-semibold tracking-tight">{plan.project.name}</h1>
+        <header className="@container shrink-0 border-b border-border/70 bg-background/95 px-4 py-3 backdrop-blur lg:px-8">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+              <div className="min-w-0 flex-[1_1_240px]">
+                <div className="flex min-w-0 items-center gap-2">
+                  <h1 className="truncate text-xl font-semibold tracking-tight" title={plan.project.name}>{plan.project.name}</h1>
                   <DropdownMenuRoot>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon-xs" aria-label="Project actions">
@@ -2703,68 +2696,30 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                           aria-label="Download JSON export"
                           onClick={() => void downloadExport()}
                         >
-                          <DownloadSimple />
+                          <DownloadSimple weight="bold" />
                         </Button>
                       </TooltipTrigger>
                       <TooltipContent>Download JSON export</TooltipContent>
                     </TooltipRoot>
                   </TooltipProvider>
                 </div>
-                <div className="mt-3 flex items-center gap-3">
+                <div className="mt-1 flex items-center gap-3">
                   <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
                 </div>
               </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <NavigationMenuRoot className="w-fit shrink-0 grow-0">
-                <NavigationMenuList className="flex w-fit items-center gap-2 rounded-2xl border border-border/70 bg-muted/30 p-1">
-                  <NavigationMenuItem>
-                    <NavigationMenuTrigger active={view === "list"} onClick={() => setView("list")}>
-                      List
-                    </NavigationMenuTrigger>
-                  </NavigationMenuItem>
-                  <NavigationMenuItem>
-                    <NavigationMenuTrigger active={view === "gantt"} onClick={() => setView("gantt")}>
-                      Gantt
-                    </NavigationMenuTrigger>
-                  </NavigationMenuItem>
-                </NavigationMenuList>
-              </NavigationMenuRoot>
-
-              <div className="flex min-w-[min(100%,_280px)] flex-1 flex-wrap items-center justify-end gap-3">
-                {view === "gantt" ? (
-                  <div className="flex shrink-0 flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1 rounded-2xl border border-border/70 bg-background p-1 shadow-sm">
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        onClick={() => setGanttColumnWidth((current) => Math.max(minGanttColumnWidth, current - GANTT_ZOOM_STEP))}
-                        disabled={!canZoomOut}
-                      >
-                        <Minus className="size-3.5" />
-                      </Button>
-                      <span className="px-2 text-xs font-medium text-muted-foreground">Zoom</span>
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        onClick={() => setGanttColumnWidth((current) => Math.min(GANTT_MAX_COLUMN_WIDTH, current + GANTT_ZOOM_STEP))}
-                        disabled={!canZoomIn}
-                      >
-                        <Plus className="size-3.5" />
-                      </Button>
-                    </div>
-                    <Button
-                      variant={showBaselineBars ? "default" : "outline"}
-                      aria-pressed={showBaselineBars}
-                      disabled={!plan.project.baselineCapturedAt}
-                      onClick={() => setShowBaselineBars((current) => !current)}
-                    >
-                      Baseline
-                    </Button>
-                  </div>
-                ) : null}
-                <InputGroup className="min-w-[220px] max-w-[320px] flex-[1_1_260px]">
+            <div className="flex shrink-0 items-center gap-2">
+              <DropdownMenuRoot>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" aria-label={`View: ${view === "list" ? "List" : "Gantt"}`}>
+                    {view === "list" ? "List" : "Gantt"}<CaretDown className="size-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => setView("list")}>List {view === "list" ? <Check /> : null}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setView("gantt")}>Gantt {view === "gantt" ? <Check /> : null}</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenuRoot>
+                <InputGroup className="hidden w-44 @min-[700px]:flex">
                   <InputGroupAddon>
                     <MagnifyingGlass className="size-4" />
                   </InputGroupAddon>
@@ -2772,39 +2727,58 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                     placeholder="Search tasks"
+                    aria-label="Search tasks"
                   />
                 </InputGroup>
-                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <PopoverRoot>
+                  <PopoverTrigger asChild>
+                    <Button variant={search ? "secondary" : "outline"} size="icon-sm" aria-label="Search tasks" className="@min-[700px]:hidden">
+                      <MagnifyingGlass className="size-4" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-72">
+                    <InputGroup>
+                      <InputGroupAddon><MagnifyingGlass className="size-4" /></InputGroupAddon>
+                      <InputGroupField value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search tasks" aria-label="Search tasks" />
+                    </InputGroup>
+                  </PopoverContent>
+                </PopoverRoot>
+                <DropdownMenuRoot>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" aria-label="Tracker controls">
+                      {statusFilter === "all" ? "All tasks" : statusFilter === "open" ? "Open tasks" : "Done tasks"}
+                      <CaretDown className="size-3" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {(["all", "open", "done"] as const).map((status) => (
+                      <DropdownMenuItem key={status} onClick={() => setStatusFilter(status)}>
+                        {status === "all" ? "All tasks" : status === "open" ? "Open tasks" : "Done tasks"}
+                        {statusFilter === status ? <Check /> : null}
+                      </DropdownMenuItem>
+                    ))}
                   {hasTasks ? (
                     <>
-                      <Button variant="outline" onClick={() => setAllExpanded(true)}>
-                        <ArrowsOutLineVertical />
-                        Expand all
-                      </Button>
-                      <Button variant="outline" onClick={() => setAllExpanded(false)}>
-                        <ArrowsInLineHorizontal />
-                        Collapse all
-                      </Button>
+                      <DropdownMenuItem onClick={() => setAllExpanded(true)}><ArrowsOutLineVertical />Expand all</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setAllExpanded(false)}><ArrowsInLineHorizontal />Collapse all</DropdownMenuItem>
                     </>
                   ) : null}
-                  <Button variant={statusFilter === "all" ? "default" : "outline"} onClick={() => setStatusFilter("all")}>
-                    All
-                  </Button>
-                  <Button variant={statusFilter === "open" ? "default" : "outline"} onClick={() => setStatusFilter("open")}>
-                    Open
-                  </Button>
-                  <Button variant={statusFilter === "done" ? "default" : "outline"} onClick={() => setStatusFilter("done")}>
-                    Done
-                  </Button>
-                </div>
-              </div>
+                  {view === "gantt" ? (
+                    <>
+                      <DropdownMenuItem disabled={!canZoomOut} onClick={() => setGanttColumnWidth((current) => Math.max(minGanttColumnWidth, current - GANTT_ZOOM_STEP))}><Minus />Zoom out</DropdownMenuItem>
+                      <DropdownMenuItem disabled={!canZoomIn} onClick={() => setGanttColumnWidth((current) => Math.min(GANTT_MAX_COLUMN_WIDTH, current + GANTT_ZOOM_STEP))}><Plus />Zoom in</DropdownMenuItem>
+                      <DropdownMenuItem disabled={!plan.project.baselineCapturedAt} onClick={() => setShowBaselineBars((current) => !current)}>{showBaselineBars ? "Hide baseline" : "Show baseline"}</DropdownMenuItem>
+                    </>
+                  ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenuRoot>
             </div>
           </div>
         </header>
 
-        <section className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-3 lg:px-8">
           {view === "list" ? (
-            <div className="max-h-[calc(100vh-250px)] overflow-auto rounded-3xl border border-border/70 bg-card shadow-sm">
+            <div className="min-h-0 flex-1 overflow-auto rounded-3xl border border-border/70 bg-card shadow-sm">
               <div className={cn("sticky top-0 z-30 grid rounded-t-3xl border-b border-border/70 bg-background px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground shadow-sm", LIST_GRID_CLASS)}>
                 <span>Name</span>
                 <span>Status</span>
@@ -2839,8 +2813,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </div>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-3xl border border-slate-200 bg-card shadow-sm">
-              <div ref={ganttViewportRef} className="max-h-[calc(100vh-250px)] overflow-auto">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-card shadow-sm">
+              <div ref={ganttViewportRef} className="min-h-0 flex-1 overflow-auto">
                 <div className="min-w-max">
                   <div className="sticky top-0 z-30 flex border-b border-slate-200 bg-white/95 backdrop-blur">
                     <div
