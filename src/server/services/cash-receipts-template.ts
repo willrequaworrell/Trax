@@ -168,6 +168,8 @@ function createSummaryTask(args: {
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: args.now,
     updatedAt: args.now,
   };
@@ -206,6 +208,8 @@ function createLeafTask(args: {
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: args.now,
     updatedAt: args.now,
   };

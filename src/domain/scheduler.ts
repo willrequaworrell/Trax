@@ -29,6 +29,7 @@ type Snapshot = {
   dependencies: Dependency[];
   checkpoints: Checkpoint[];
   pendingDeleteActions?: PendingDeleteAction[];
+  statusDate?: string;
 };
 
 function makeIssue(
@@ -370,7 +371,7 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
     }
 
     const computedStart =
-      task.actualStart || task.actualEnd
+      task.actualStart || task.actualEnd || task.forecastLocked
         ? projectedRange.start
         : shiftBusinessDays(
             baseStart,
@@ -393,6 +394,15 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
                   : Math.max(durationDays, 1),
               );
     const percentComplete = hasCheckpoints ? computeCheckpointPercent(checkpoints) : task.percentComplete;
+    const statusDate = clampToBusinessDay(snapshot.statusDate ?? isoToday());
+    if (!task.actualEnd && percentComplete < 100 && snapshot.project.baselineCapturedAt &&
+        (task.forecastNeedsReview || compareIsoDates(projectedRange.end, statusDate) < 0)) {
+      taskIssues.push(makeIssue(`forecast-review-${task.id}`, "Update expected finish", "warning", task.id));
+    }
+    if (task.forecastLocked && (compareIsoDates(requiredStart, baseStart) > 0 || compareIsoDates(requiredEnd, baseEnd) > 0)) {
+      taskIssues.push(makeIssue(`fixed-date-conflict-${task.id}`, "Fixed forecast date conflicts with dependencies", "warning", task.id));
+    }
+
     const leafStatus = deriveStatus(task.status, percentComplete, task.actualStart, task.actualEnd);
     const computedBaselineStart = task.baselinePlannedStart
       ? clampToBusinessDay(task.baselinePlannedStart)
@@ -533,7 +543,10 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
       rolledUpStatus: summaryStatus,
       checkpoints: [],
       isProgressDerived: false,
-      issues: childPlans.flatMap((child) => child.issues),
+      issues: [
+        ...childPlans.flatMap((child) => child.issues),
+        ...(childPlans.length === 0 ? [makeIssue(`empty-section-${taskId}`, "Empty section", "warning", taskId)] : []),
+      ],
     };
 
     planned.set(taskId, summaryPlan);
@@ -613,6 +626,30 @@ export function computeProjectPlan(snapshot: Snapshot): ProjectPlan {
 
   for (const rootTaskId of orderedChildren.get(null) ?? []) {
     appendRows(rootTaskId);
+  }
+
+  const targetId = snapshot.project.reportingTargetTaskId;
+  if (targetId) {
+    const target = planned.get(targetId);
+    if (!target || target.isSummary) {
+      issues.push(makeIssue("missing-deployment-target", "Choose a deployment target; the selected task is unavailable."));
+    } else {
+      const connected = new Set([targetId]);
+      const stack = [targetId];
+      while (stack.length) {
+        for (const dependency of dependenciesBySuccessor.get(stack.pop()!) ?? []) {
+          if (!connected.has(dependency.predecessorTaskId)) {
+            connected.add(dependency.predecessorTaskId);
+            stack.push(dependency.predecessorTaskId);
+          }
+        }
+      }
+      for (const task of allTasks) {
+        if (!task.isSummary && task.rolledUpStatus !== "done" && !connected.has(task.id)) {
+          task.issues.push(makeIssue(`unlinked-deployment-${task.id}`, "Not linked to deployment", "warning", task.id));
+        }
+      }
+    }
   }
 
   for (const task of allTasks) {

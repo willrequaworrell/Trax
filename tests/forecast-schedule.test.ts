@@ -2,11 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Dependency, Task } from "@/domain/planner";
-import { reconcileOverdueForecast, reflowDownstreamForecast } from "@/server/services/forecast-schedule";
+import { cascadeForecastFromSeeds, reconcileOverdueForecast, reflowDownstreamForecast } from "@/server/services/forecast-schedule";
 
 function makeTask(overrides: Partial<Task> & Pick<Task, "id">): Task {
   return {
-    id: overrides.id,
     projectId: "project",
     parentId: null,
     name: overrides.id,
@@ -25,6 +24,8 @@ function makeTask(overrides: Partial<Task> & Pick<Task, "id">): Task {
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: "2026-07-01T12:00:00.000Z",
     updatedAt: "2026-07-01T12:00:00.000Z",
     ...overrides,
@@ -178,4 +179,63 @@ test("rejects downstream reflow when the affected dependency graph contains a cy
     () => reflowDownstreamForecast({ tasks, dependencies }, "anchor"),
     /contain a cycle/,
   );
+});
+
+
+test("automatic cascade pulls a chain earlier with current estimates and leaves unrelated and started work intact", () => {
+  const tasks = [
+    makeTask({ id: "development", actualStart: "2026-10-12", actualEnd: "2026-10-12", percentComplete: 100 }),
+    makeTask({ id: "testing", plannedStart: "2026-10-15", plannedDurationDays: 2, baselinePlannedDurationDays: 1 }),
+    makeTask({ id: "deployment", type: "milestone", plannedStart: "2026-10-19", plannedDurationDays: 0 }),
+    makeTask({ id: "unrelated", plannedStart: "2026-10-22" }),
+    makeTask({ id: "started", actualStart: "2026-10-15", percentComplete: 20 }),
+  ];
+  const dependencies = [fsDependency("development", "testing"), fsDependency("testing", "deployment"), fsDependency("development", "started")];
+  const automatic = cascadeForecastFromSeeds({ tasks, dependencies }, ["development"], { automatic: true, statusDate: "2026-10-12" });
+  assert.equal(automatic[1].plannedStart, "2026-10-13");
+  assert.equal(automatic[1].plannedDurationDays, 2);
+  assert.equal(automatic[2].plannedStart, "2026-10-15");
+  assert.deepEqual(automatic[3], tasks[3]);
+  assert.deepEqual(automatic[4], tasks[4]);
+  assert.equal(automatic[1].baselinePlannedDurationDays, 1);
+  const manual = cascadeForecastFromSeeds({ tasks, dependencies }, ["development"]);
+  assert.equal(manual[1].plannedStart, "2026-10-15");
+  assert.equal(manual[2].plannedStart, "2026-10-19");
+});
+
+test("automatic cascade respects the latest predecessor, lags, weekends, fixed dates and the status date", () => {
+  const tasks = [
+    makeTask({ id: "development", plannedStart: "2026-10-12", plannedDurationDays: 1 }),
+    makeTask({ id: "approval", plannedStart: "2026-10-16", plannedDurationDays: 1 }),
+    makeTask({ id: "testing", plannedStart: "2026-10-22", plannedDurationDays: 2 }),
+    makeTask({ id: "deployment", type: "milestone", plannedStart: "2026-10-26", plannedDurationDays: 0, forecastLocked: true }),
+  ];
+  const dependencies = [fsDependency("development", "testing"), { ...fsDependency("approval", "testing"), lagDays: 1 }, fsDependency("testing", "deployment")];
+  const next = cascadeForecastFromSeeds({ tasks, dependencies }, ["development"], { automatic: true });
+  assert.equal(next[2].plannedStart, "2026-10-20");
+  assert.deepEqual(next[3], tasks[3]);
+  const today = cascadeForecastFromSeeds({ tasks, dependencies }, ["development"], { automatic: true, statusDate: "2026-10-23" });
+  assert.equal(today[2].plannedStart, "2026-10-23");
+});
+
+test("automatic scheduling honors SS, FF and SF constraints with current durations", () => {
+  for (const [type, expected] of [["SS", "2026-10-13"], ["FF", "2026-10-14"], ["SF", "2026-10-12"]] as const) {
+    const tasks = [makeTask({ id: "a", plannedStart: "2026-10-12", plannedDurationDays: 3 }), makeTask({ id: "b", plannedStart: "2026-10-26", plannedDurationDays: 2 })];
+    const next = cascadeForecastFromSeeds({ tasks, dependencies: [{ ...fsDependency("a", "b"), type, lagDays: 1 }] }, ["a"], { automatic: true });
+    assert.equal(next[1].plannedStart, expected);
+  }
+});
+
+test("overdue reconciliation marks forecasts for review without rewriting fixed dates or actuals", () => {
+  const tasks = [makeTask({ id: "started", actualStart: "2026-07-01", percentComplete: 60 }), makeTask({ id: "fixed", forecastLocked: true })];
+  const next = reconcileOverdueForecast({ tasks, dependencies: [] }, "2026-07-10");
+  assert.equal(next[0].forecastNeedsReview, true);
+  assert.equal(next[0].actualStart, "2026-07-01");
+  assert.deepEqual(next[1], tasks[1]);
+  const tomorrow = reconcileOverdueForecast({ tasks: next, dependencies: [] }, "2026-07-13");
+  assert.equal(tomorrow[0].forecastNeedsReview, true);
+});
+
+test("automatic scheduling rejects cycles before returning partially changed forecasts", () => {
+  assert.throws(() => cascadeForecastFromSeeds({ tasks: [makeTask({ id: "a" }), makeTask({ id: "b" })], dependencies: [fsDependency("a", "b"), fsDependency("b", "a")] }, ["a"], { automatic: true }), /cycle/);
 });

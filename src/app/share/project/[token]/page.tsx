@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 
+import { deploymentForecast } from "@/domain/forecast-report";
 import { shiftBusinessDays } from "@/domain/date-utils";
 import type { PlannedTask } from "@/domain/planner";
 import { getSharedProjectPlan } from "@/server/services/project-service";
@@ -300,7 +301,9 @@ export default async function SharedProjectPage({ params }: Props) {
     )
     .slice(0, 5);
   const baselineEnd = projectBaselineEnd(plan.tasks);
-  const reportingTargetTask = shareLink.reportingTargetTaskId ? taskById.get(shareLink.reportingTargetTaskId) ?? null : null;
+  const targetId = shareLink.reportingTargetTaskId ?? plan.project.reportingTargetTaskId;
+  const report = deploymentForecast(plan, targetId);
+  const reportingTargetTask = targetId ? taskById.get(targetId) ?? null : null;
   const reportingTarget = {
     name: reportingTargetTask?.name ?? "Whole tracker",
     date: targetDate(reportingTargetTask, plan.timelineEnd),
@@ -330,12 +333,13 @@ export default async function SharedProjectPage({ params }: Props) {
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Target date</p>
             <p className="mt-3 text-2xl font-semibold">{formatDate(reportingTarget.date)}</p>
             <p className="mt-1 text-sm text-muted-foreground">{reportingTarget.name}</p>
+            {report.needsReview ? <p className="mt-2 text-sm font-medium text-amber-700">Forecast needs review</p> : null}
           </div>
           {shareLink.showBaselineVariance ? (
             <div className="rounded-lg border border-border/70 bg-card p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Baseline Delta</p>
-              <p className="mt-3 text-lg font-medium">{varianceLabel(baselineEnd, plan.timelineEnd)}</p>
-              <p className="mt-1 text-xs text-muted-foreground">Baseline end {formatDate(baselineEnd)}</p>
+              <p className="mt-3 text-lg font-medium">{varianceLabel(reportingTargetTask ? report.baseline : baselineEnd, reportingTarget.date)}</p>
+              <p className="mt-1 text-xs text-muted-foreground">Baseline end {formatDate(reportingTargetTask ? report.baseline : baselineEnd)}</p>
             </div>
           ) : null}
         </section>

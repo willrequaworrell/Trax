@@ -1,3 +1,4 @@
+import type { ProjectUpdateInput } from "@/domain/planner";
 import { deleteProject, getProjectPlan, updateProject } from "@/server/services/project-service";
 import { jsonError, jsonOk, jsonServiceError, readJson } from "@/server/http";
 import { requireApiSession } from "@/server/session";
@@ -22,7 +23,7 @@ export async function PATCH(request: Request, context: Context) {
   try {
     await requireApiSession();
     const { projectId } = await context.params;
-    const payload = await readJson<{ name?: string; description?: string }>(request);
+    const payload = await readJson<ProjectUpdateInput>(request);
     const plan = await updateProject(projectId, payload);
     return plan ? jsonOk(plan) : jsonError("Project not found.", 404);
   } catch (error) {

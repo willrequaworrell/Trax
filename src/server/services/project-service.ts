@@ -126,7 +126,8 @@ function areTaskForecastFieldsEqual(a: Task, b: Task) {
     a.plannedMode === b.plannedMode &&
     a.plannedStart === b.plannedStart &&
     a.plannedEnd === b.plannedEnd &&
-    a.plannedDurationDays === b.plannedDurationDays
+    a.plannedDurationDays === b.plannedDurationDays &&
+    a.forecastNeedsReview === b.forecastNeedsReview
   );
 }
 
@@ -233,6 +234,7 @@ async function persistForecastChanges(projectId: string, nextTasks: Task[], exis
           plannedStart: task.plannedStart,
           plannedEnd: task.plannedEnd,
           plannedDurationDays: task.plannedDurationDays,
+          forecastNeedsReview: task.forecastNeedsReview,
           updatedAt,
         })
         .where(and(eq(tasks.id, task.id), eq(tasks.projectId, projectId)));
@@ -280,7 +282,11 @@ async function cascadeProjectForecast(projectId: string, seedTaskIds: string[], 
     throw new ValidationError("Project not found.");
   }
 
-  const nextTasks = cascadeForecastFromSeeds(snapshot, seedTaskIds, { includeSeeds });
+  const nextTasks = cascadeForecastFromSeeds(snapshot, seedTaskIds, {
+    includeSeeds,
+    automatic: snapshot.project.autoSchedule,
+    statusDate: snapshot.project.baselineCapturedAt ? planningStatusDate(now()) : undefined,
+  });
   await persistForecastChanges(projectId, nextTasks);
 }
 
@@ -463,7 +469,7 @@ export async function getProjectPlan(projectId: string) {
   }
 
   assertProjectTreeIsValid(projectId, snapshot.tasks);
-  return computeProjectPlan(snapshot);
+  return computeProjectPlan({ ...snapshot, statusDate: planningStatusDate(now()) });
 }
 
 export async function createProject(input: ProjectCreateInput) {
@@ -474,6 +480,8 @@ export async function createProject(input: ProjectCreateInput) {
     name: parsed.name,
     description: parsed.description,
     baselineCapturedAt: null,
+    autoSchedule: false,
+    reportingTargetTaskId: null,
     createdAt,
     updatedAt: createdAt,
   };
@@ -582,9 +590,51 @@ export async function freezeProjectBaseline(projectId: string) {
   return getProjectPlan(projectId);
 }
 
+function automaticallyScheduledTasks(snapshot: ProjectSnapshot) {
+  const prepared = snapshot.project.baselineCapturedAt
+    ? { ...snapshot, tasks: reconcileOverdueForecast({ ...snapshot, project: { ...snapshot.project, autoSchedule: true } }, planningStatusDate(now())) }
+    : snapshot;
+  return cascadeForecastFromSeeds(prepared, prepared.tasks.filter((task) => task.type !== "summary").map((task) => task.id), {
+    includeSeeds: true,
+    automatic: true,
+    statusDate: snapshot.project.baselineCapturedAt ? planningStatusDate(now()) : undefined,
+  });
+}
+
+export async function previewAutomaticSchedule(projectId: string) {
+  const snapshot = await projectRepository.getProjectSnapshot(projectId, now());
+  if (!snapshot) return null;
+  assertProjectTreeIsValid(projectId, snapshot.tasks);
+  return computeProjectPlan({ ...snapshot, tasks: automaticallyScheduledTasks(snapshot), statusDate: planningStatusDate(now()) });
+}
+
 export async function updateProject(projectId: string, input: ProjectUpdateInput) {
   const parsed = projectUpdateSchema.parse(input);
-  await projectRepository.updateProject(projectId, { ...parsed, updatedAt: now() });
+  const snapshot = await projectRepository.getProjectSnapshot(projectId, now());
+  if (!snapshot) return null;
+  if (parsed.reportingTargetTaskId) {
+    const target = snapshot.tasks.find((task) => task.id === parsed.reportingTargetTaskId);
+    if (!target || target.type === "summary") {
+      throw new ValidationError("Deployment target must be a leaf task or milestone in this project.");
+    }
+  }
+  const nextTasks = parsed.autoSchedule === true && !snapshot.project.autoSchedule
+    ? automaticallyScheduledTasks(snapshot)
+    : snapshot.tasks;
+  const updatedAt = now();
+  const previousById = new Map(snapshot.tasks.map((task) => [task.id, task]));
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.update(projects).set({ ...parsed, updatedAt }).where(eq(projects.id, projectId));
+    for (const task of nextTasks) {
+      const previous = previousById.get(task.id)!;
+      if (!areTaskForecastFieldsEqual(previous, task)) {
+        await tx.update(tasks).set({
+          plannedStart: task.plannedStart, plannedEnd: task.plannedEnd,
+          plannedDurationDays: task.plannedDurationDays, forecastNeedsReview: task.forecastNeedsReview, updatedAt,
+        }).where(eq(tasks.id, task.id));
+      }
+    }
+  });
   return getProjectPlan(projectId);
 }
 
@@ -1167,6 +1217,9 @@ async function syncTaskProgressFromCheckpoints(taskId: string) {
 function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Task> {
   const merged = { ...existing, ...patch };
   const normalized: Partial<Task> = { ...patch };
+  if (patch.plannedEnd !== undefined || patch.plannedDurationDays !== undefined || patch.actualEnd) {
+    normalized.forecastNeedsReview = false;
+  }
 
   if (merged.type === "summary") {
     normalized.parentId = merged.parentId ?? null;
@@ -1176,6 +1229,8 @@ function normalizeTaskPatch(existing: Task, patch: TaskUpdateInput): Partial<Tas
     normalized.plannedDurationDays = null;
     normalized.actualStart = null;
     normalized.actualEnd = null;
+    normalized.forecastLocked = false;
+    normalized.forecastNeedsReview = false;
     normalized.percentComplete = existing.percentComplete;
     normalized.status = existing.status;
   } else if (merged.type === "milestone") {
@@ -1327,6 +1382,8 @@ export async function createTask(projectId: string, input: TaskCreateInput): Pro
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt,
     updatedAt: createdAt,
   };
@@ -1358,6 +1415,10 @@ export async function updateTask(taskId: string, input: TaskUpdateInput) {
     throw new ValidationError("Summary sections with children cannot be converted to leaf tasks.");
   }
 
+  if (snapshot.project.reportingTargetTaskId === taskId && nextType === "summary") {
+    throw new ValidationError("Choose a different deployment target before converting this task to a section.");
+  }
+
   if (taskHasCheckpoints && nextType !== "task") {
     throw new ValidationError("Tasks with checkpoints must remain tasks until their checkpoints are removed.");
   }
@@ -1375,12 +1436,32 @@ export async function updateTask(taskId: string, input: TaskUpdateInput) {
   ensureActualEndForCompletion(existing, parsed);
   validateTaskParent(snapshot.tasks, existing.id, nextParentId);
   const normalized = normalizeTaskPatch(existing, parsed);
-  await projectRepository.updateTask(taskId, { ...normalized, updatedAt: now() });
   const nextTask = { ...existing, ...normalized };
-
-  if (nextTask.type !== "summary" && (hasForecastPatch(parsed) || parsed.actualStart !== undefined || parsed.actualEnd !== undefined)) {
-    await cascadeProjectForecast(existing.projectId, [taskId]);
-  }
+  const updatedSnapshot = { ...snapshot, tasks: snapshot.tasks.map((task) => task.id === taskId ? nextTask : task) };
+  const scheduleChanged = hasForecastPatch(parsed) || parsed.actualStart !== undefined || parsed.actualEnd !== undefined || parsed.forecastLocked !== undefined;
+  const nextTasks = nextTask.type !== "summary" && scheduleChanged
+    ? cascadeForecastFromSeeds(updatedSnapshot, [taskId], {
+        includeSeeds: parsed.forecastLocked === false,
+        automatic: snapshot.project.autoSchedule,
+        statusDate: snapshot.project.baselineCapturedAt ? planningStatusDate(now()) : undefined,
+      })
+    : updatedSnapshot.tasks;
+  const updatedAt = now();
+  const previousById = new Map(updatedSnapshot.tasks.map((task) => [task.id, task]));
+  await projectRepository.withTransaction(async (tx) => {
+    await tx.update(tasks).set({ ...normalized, updatedAt }).where(eq(tasks.id, taskId));
+    for (const task of nextTasks) {
+      const previous = previousById.get(task.id)!;
+      if (!areTaskForecastFieldsEqual(previous, task)) {
+        await tx.update(tasks).set({
+          plannedStart: task.plannedStart, plannedEnd: task.plannedEnd,
+          plannedDurationDays: task.plannedDurationDays,
+          forecastNeedsReview: task.forecastNeedsReview, updatedAt,
+        }).where(eq(tasks.id, task.id));
+      }
+    }
+    await tx.update(projects).set({ updatedAt }).where(eq(projects.id, existing.projectId));
+  });
 
   return getProjectPlan(existing.projectId);
 }
@@ -1425,6 +1506,8 @@ export async function deleteTask(taskId: string) {
       .where(eq(projects.id, task.projectId));
   });
 
+  const successors = payload.dependencies.filter((dependency) => deletedIds.includes(dependency.predecessorTaskId) && !deletedIds.includes(dependency.successorTaskId)).map((dependency) => dependency.successorTaskId);
+  if (successors.length) await cascadeProjectForecast(task.projectId, successors, true);
   return getProjectPlan(task.projectId);
 }
 
@@ -1468,6 +1551,8 @@ export async function wrapTaskInSection(taskId: string, input: TaskWrapInput = {
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt,
     updatedAt: createdAt,
   };
@@ -1665,7 +1750,7 @@ export async function moveCheckpoint(checkpointId: string, input: CheckpointMove
   return getProjectPlan(task.projectId);
 }
 
-async function validateDependency(projectId: string, input: DependencyCreateInput | DependencyUpdateInput) {
+async function validateDependency(projectId: string, input: DependencyCreateInput | DependencyUpdateInput, existingDependencyId?: string) {
   const snapshot = await projectRepository.getProjectSnapshot(projectId);
 
   if (!snapshot) {
@@ -1686,6 +1771,17 @@ async function validateDependency(projectId: string, input: DependencyCreateInpu
   if (predecessor.id === successor.id) {
     throw new Error("A task cannot depend on itself.");
   }
+  if (snapshot.project.autoSchedule) {
+    const proposed: Dependency = {
+      id: existingDependencyId ?? "preview", projectId,
+      predecessorTaskId: predecessor.id, successorTaskId: successor.id,
+      type: input.type ?? "FS", lagDays: input.lagDays ?? 0,
+      createdAt: now(), updatedAt: now(),
+    };
+    cascadeForecastFromSeeds({ ...snapshot, dependencies: [...snapshot.dependencies.filter((dependency) => dependency.id !== existingDependencyId), proposed] },
+      [successor.id], { includeSeeds: true, automatic: true });
+  }
+
 }
 
 export async function createDependency(projectId: string, input: DependencyCreateInput) {
@@ -1717,9 +1813,9 @@ export async function updateDependency(dependencyId: string, input: DependencyUp
   }
 
   const merged = { ...dependency, ...parsed };
-  await validateDependency(dependency.projectId, merged);
+  await validateDependency(dependency.projectId, merged, dependencyId);
   await projectRepository.updateDependency(dependencyId, { ...parsed, updatedAt: now() });
-  await cascadeProjectForecast(dependency.projectId, [merged.successorTaskId], true);
+  await cascadeProjectForecast(dependency.projectId, [...new Set([dependency.successorTaskId, merged.successorTaskId])], true);
   return getProjectPlan(dependency.projectId);
 }
 

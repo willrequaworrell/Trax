@@ -10,6 +10,7 @@ import * as projectService from "@/server/services/project-service";
 import { GET as exportProjectRoute } from "@/app/api/projects/[projectId]/export/route";
 import { POST as freezeBaselineRoute } from "@/app/api/projects/[projectId]/freeze-baseline/route";
 import { POST as rebaseProjectRoute } from "@/app/api/projects/[projectId]/rebase/route";
+import { GET as previewScheduleRoute } from "@/app/api/projects/[projectId]/schedule-preview/route";
 import { GET as getProjectRoute } from "@/app/api/projects/[projectId]/route";
 import { DELETE as revokeShareLinkRoute, GET as getShareLinkRoute, PATCH as patchShareLinkRoute, POST as createShareLinkRoute } from "@/app/api/projects/[projectId]/share/route";
 import { POST as regenerateShareLinkRoute } from "@/app/api/projects/[projectId]/share/regenerate/route";
@@ -19,7 +20,7 @@ import { POST as wrapTaskRoute } from "@/app/api/tasks/[taskId]/wrap/route";
 import { POST as undoRoute } from "@/app/api/undo/[undoId]/route";
 import type { Dependency, Task } from "@/domain/planner";
 
-process.env.NODE_ENV = "test";
+Object.assign(process.env, { NODE_ENV: "test" });
 process.env.ALLOWED_EMAIL = "owner@example.com";
 process.env.AUTH_SECRET = "test-secret";
 process.env.AUTH_GOOGLE_ID = "test-google-id";
@@ -45,6 +46,8 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name" | "projectId">)
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
     ...task,
@@ -1929,4 +1932,114 @@ test("export route returns markdown and enriched json without changing the API",
   assert.equal(jsonPayload.generatedAt, "2026-03-30T15:00:00.000Z");
   assert.ok(Array.isArray(jsonPayload.rows));
   assert.ok(Array.isArray(jsonPayload.pendingUndoActions));
+});
+
+
+async function makeForecastChain() {
+  projectService.__testUtils.setNowOverride("2026-10-12T15:00:00.000Z");
+  const project = await makeProject("automatic-forecast");
+  const dev = await projectService.createTask(project.project.id, { name: "Development", type: "task", plannedStart: "2026-10-12", plannedDurationDays: 3 });
+  const testing = await projectService.createTask(project.project.id, { name: "Testing", type: "task", plannedStart: "2026-10-15", plannedDurationDays: 2 });
+  const deployment = await projectService.createTask(project.project.id, { name: "Deployment", type: "milestone", plannedStart: "2026-10-19" });
+  await projectService.createDependency(project.project.id, { predecessorTaskId: dev!.taskId, successorTaskId: testing!.taskId, type: "FS", lagDays: 0 });
+  await projectService.createDependency(project.project.id, { predecessorTaskId: testing!.taskId, successorTaskId: deployment!.taskId, type: "FS", lagDays: 0 });
+  await projectService.freezeProjectBaseline(project.project.id);
+  return { projectId: project.project.id, devId: dev!.taskId, testingId: testing!.taskId, deploymentId: deployment!.taskId };
+}
+
+test("opt-in automatic scheduling persists earlier completion through deployment without changing baseline", async () => {
+  const { projectId, devId, testingId, deploymentId } = await makeForecastChain();
+  await projectService.updateProject(projectId, { autoSchedule: true, reportingTargetTaskId: deploymentId });
+  const next = await projectService.updateTask(devId, { actualStart: "2026-10-12", actualEnd: "2026-10-12" });
+  assert.equal(next!.tasks.find((task) => task.id === testingId)!.computedPlannedStart, "2026-10-13");
+  assert.equal((await projectRepository.getTask(deploymentId))!.plannedStart, "2026-10-15");
+  assert.equal((await projectRepository.getTask(deploymentId))!.baselinePlannedStart, "2026-10-19");
+  await projectService.updateProject(projectId, { autoSchedule: false });
+  assert.equal((await projectRepository.getTask(testingId))!.plannedStart, "2026-10-13");
+  const manual = await projectService.updateTask(testingId, { plannedStart: "2026-10-20" });
+  assert.equal(manual!.tasks.find((task) => task.id === deploymentId)!.computedPlannedStart, "2026-10-22");
+});
+
+test("automatic schedule preview changes no forecast or project setting", async () => {
+  const { projectId, testingId, deploymentId } = await makeForecastChain();
+  await projectService.updateTask(testingId, { plannedStart: "2026-10-22" });
+  const before = await projectRepository.getProjectSnapshot(projectId);
+  const preview = await projectService.previewAutomaticSchedule(projectId);
+  assert.equal(preview!.tasks.find((task) => task.id === testingId)!.computedPlannedStart, "2026-10-15");
+  assert.deepEqual(await projectRepository.getProjectSnapshot(projectId), before);
+  const enabled = await projectService.updateProject(projectId, { autoSchedule: true });
+  assert.equal(enabled!.tasks.find((task) => task.id === deploymentId)!.computedPlannedStart, "2026-10-19");
+});
+
+test("overdue review survives rolling and progress updates until an expected finish is supplied", async () => {
+  const { projectId, devId, deploymentId } = await makeForecastChain();
+  await projectService.updateProject(projectId, { autoSchedule: true, reportingTargetTaskId: deploymentId });
+  await projectService.updateTask(devId, { actualStart: "2026-10-12", percentComplete: 60 });
+  projectService.__testUtils.setNowOverride("2026-10-16T15:00:00.000Z");
+  const overdue = await projectService.getProjectPlan(projectId);
+  assert.ok(overdue!.tasks.find((task) => task.id === devId)!.forecastNeedsReview);
+  await projectService.updateTask(devId, { percentComplete: 80 });
+  assert.equal((await projectRepository.getTask(devId))!.forecastNeedsReview, true);
+  const revised = await projectService.updateTask(devId, { plannedEnd: "2026-10-21", plannedMode: "start_end" });
+  assert.equal((await projectRepository.getTask(devId))!.forecastNeedsReview, false);
+  assert.equal(revised!.tasks.find((task) => task.id === deploymentId)!.computedPlannedStart, "2026-10-26");
+  assert.equal((await projectRepository.getTask(devId))!.baselinePlannedEnd, "2026-10-14");
+});
+
+test("deployment target validates project membership and duplication remaps target and resets review", async () => {
+  const { projectId, deploymentId, devId } = await makeForecastChain();
+  const other = await makeProject("other");
+  await assert.rejects(projectService.updateProject(other.project.id, { reportingTargetTaskId: deploymentId }), /Deployment target/);
+  await projectService.updateProject(projectId, { reportingTargetTaskId: deploymentId, autoSchedule: true });
+  await projectRepository.updateTask(devId, { forecastNeedsReview: true });
+  const copy = await projectService.duplicateProject(projectId);
+  assert.equal(copy!.project.autoSchedule, true);
+  assert.notEqual(copy!.project.reportingTargetTaskId, deploymentId);
+  assert.equal(copy!.tasks.find((task) => task.id === copy!.project.reportingTargetTaskId)!.name, "Deployment");
+  assert.ok(copy!.tasks.every((task) => !task.forecastNeedsReview));
+});
+
+test("fixed deployment dates remain anchored and conflicting dependencies produce a warning", async () => {
+  const { projectId, devId, deploymentId } = await makeForecastChain();
+  await projectService.updateProject(projectId, { autoSchedule: true, reportingTargetTaskId: deploymentId });
+  await projectService.updateTask(deploymentId, { forecastLocked: true });
+  const next = await projectService.updateTask(devId, { plannedDurationDays: 8 });
+  const deployment = next!.tasks.find((task) => task.id === deploymentId)!;
+  assert.equal(deployment.computedPlannedEnd, "2026-10-19");
+  assert.ok(deployment.issues.some((issue) => issue.id.startsWith("fixed-date-conflict-")));
+});
+
+
+test("automatic dependency edits reject cycles before saving the new link", async () => {
+  const { projectId, devId, deploymentId } = await makeForecastChain();
+  await projectService.updateProject(projectId, { autoSchedule: true });
+  const before = await projectRepository.getProjectSnapshot(projectId);
+  await assert.rejects(projectService.createDependency(projectId, { predecessorTaskId: deploymentId, successorTaskId: devId, type: "FS", lagDays: 0 }), /cycle/);
+  assert.deepEqual(await projectRepository.getProjectSnapshot(projectId), before);
+});
+
+test("schedule previews require authentication and return a plan without enabling automation", async () => {
+  const { projectId } = await makeForecastChain();
+  const request = new Request(`https://traxly.test/api/projects/${projectId}/schedule-preview`);
+  const context = { params: Promise.resolve({ projectId }) };
+  process.env.TRAXLY_TEST_AUTH_EMAIL = "";
+  assert.equal((await previewScheduleRoute(request, context)).status, 401);
+  process.env.TRAXLY_TEST_AUTH_EMAIL = "owner@example.com";
+  const response = await previewScheduleRoute(request, context);
+  assert.equal(response.status, 200);
+  assert.equal((await projectRepository.getProject(projectId))!.autoSchedule, false);
+});
+
+
+test("removing a dependency pulls its successor earlier when another prerequisite remains", async () => {
+  const { projectId, devId, testingId } = await makeForecastChain();
+  const approval = await projectService.createTask(projectId, { name: "Approval", type: "task", plannedStart: "2026-10-22", plannedDurationDays: 1 });
+  await projectService.createDependency(projectId, { predecessorTaskId: approval!.taskId, successorTaskId: testingId, type: "FS", lagDays: 0 });
+  await projectService.updateProject(projectId, { autoSchedule: true });
+  const snapshot = await projectRepository.getProjectSnapshot(projectId);
+  const link = snapshot!.dependencies.find((dependency) => dependency.predecessorTaskId === approval!.taskId)!;
+  const next = await projectService.deleteDependency(link.id);
+  assert.equal(next!.tasks.find((task) => task.id === testingId)!.computedPlannedStart, "2026-10-15");
+  assert.equal((await projectRepository.getTask(devId))!.plannedStart, "2026-10-12");
+  assert.equal((await projectRepository.getTask(approval!.taskId))!.plannedStart, "2026-10-22");
 });

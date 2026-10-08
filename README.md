@@ -52,3 +52,15 @@ Create `.env.local` with the values from `.env.example`.
 
 - Runtime migrations are not executed automatically. Run `pnpm db:migrate` before starting a fresh environment.
 - Local/system fonts are used so production builds work in restricted environments without remote font fetching.
+
+## Forecast updates
+
+Open **Project actions → Forecast settings** to select a deployment task or milestone and opt into automatic downstream scheduling. Enabling it previews the affected dates. Existing projects keep their current scheduling behavior until enabled.
+
+Automatic scheduling moves unstarted dependent work earlier or later using current forecast durations, including when a predecessor finishes ahead of plan. It preserves baseline, actual execution, started tasks, and unrelated branches. Use **Keep forecast dates fixed** in a task menu for an intentional release window; conflicting dependencies produce a warning. Turning automation off retains the current dates. **Reflow downstream** remains a separate action that can restore baseline sizing.
+
+Date arrows show business-day movement from the last schedule change in the current session; **Clear arrows** dismisses them. The planner shows the selected deployment forecast and its variance against that target's baseline. Shared reports use the project's target unless the share link explicitly selects another target.
+
+Overdue unfinished work is flagged **Update expected finish**, even after its date is automatically rolled forward. Edit its forecast end or duration to provide a revised estimate; checkpoint progress alone does not predict remaining time. A deployment forecast whose prerequisite estimates need attention is marked **Forecast needs review**. Empty sections and unfinished tasks without a dependency path to the selected deployment target receive advisory warnings. Additional work belongs in rework sections with dependencies linking it to deployment.
+
+Apply migration `0006_empty_major_mapleleaf.sql` with `pnpm db:migrate` before running this version against an existing hosted database.

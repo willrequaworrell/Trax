@@ -23,6 +23,8 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name">): Task {
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
     ...task,

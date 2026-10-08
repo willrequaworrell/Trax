@@ -254,6 +254,8 @@ export class ProjectRepository {
         name: values.name,
         description: values.description,
         baselineCapturedAt: values.baselineCapturedAt,
+        autoSchedule: values.autoSchedule,
+        reportingTargetTaskId: values.reportingTargetTaskId,
         updatedAt: values.updatedAt,
       })
       .where(eq(projects.id, projectId));
@@ -535,6 +537,8 @@ export class ProjectRepository {
         status: values.status,
         percentComplete: values.percentComplete,
         isExpanded: values.isExpanded,
+        forecastNeedsReview: values.forecastNeedsReview,
+        forecastLocked: values.forecastLocked,
         updatedAt: values.updatedAt,
       })
       .where(eq(tasks.id, taskId));

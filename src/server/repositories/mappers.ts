@@ -20,6 +20,8 @@ export function mapProjectRow(row: ProjectRow): Project {
     name: row.name,
     description: row.description,
     baselineCapturedAt: row.baselineCapturedAt,
+    autoSchedule: row.autoSchedule,
+    reportingTargetTaskId: row.reportingTargetTaskId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -46,6 +48,8 @@ export function mapTaskRow(row: TaskRow): Task {
     status: row.status as Task["status"],
     percentComplete: row.percentComplete,
     isExpanded: row.isExpanded,
+    forecastNeedsReview: row.forecastNeedsReview,
+    forecastLocked: row.forecastLocked,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -109,6 +113,8 @@ export function toProjectInsert(project: Project): ProjectInsert {
     name: project.name,
     description: project.description,
     baselineCapturedAt: project.baselineCapturedAt,
+    autoSchedule: project.autoSchedule,
+    reportingTargetTaskId: project.reportingTargetTaskId,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   };
@@ -135,6 +141,8 @@ export function toTaskInsert(task: Task): TaskInsert {
     status: task.status,
     percentComplete: task.percentComplete,
     isExpanded: task.isExpanded,
+    forecastNeedsReview: task.forecastNeedsReview,
+    forecastLocked: task.forecastLocked,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   };

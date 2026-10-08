@@ -28,6 +28,7 @@ export function duplicateProjectSnapshot(snapshot: Snapshot, options: Options): 
     name: options.name ?? `${snapshot.project.name} Copy`,
     description: options.description ?? snapshot.project.description,
     baselineCapturedAt: null,
+    reportingTargetTaskId: snapshot.project.reportingTargetTaskId ? taskIdMap.get(snapshot.project.reportingTargetTaskId) ?? null : null,
     createdAt: options.now,
     updatedAt: options.now,
   };
@@ -44,6 +45,7 @@ export function duplicateProjectSnapshot(snapshot: Snapshot, options: Options): 
     actualEnd: null,
     status: "not_started",
     percentComplete: 0,
+    forecastNeedsReview: false,
     createdAt: options.now,
     updatedAt: options.now,
   }));
