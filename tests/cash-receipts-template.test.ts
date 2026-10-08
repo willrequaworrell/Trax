@@ -29,6 +29,8 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name" | "projectId">)
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
     ...task,
@@ -61,6 +63,8 @@ function buildSourceSnapshot(): Snapshot {
     name: "Intercompany Vouchers",
     description: "",
     baselineCapturedAt: null,
+    autoSchedule: false,
+    reportingTargetTaskId: null,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
   };

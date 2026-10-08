@@ -19,6 +19,8 @@ export const projectSchema = z.object({
   name: z.string().min(1),
   description: z.string(),
   baselineCapturedAt: z.string().nullable(),
+  autoSchedule: z.boolean().default(false),
+  reportingTargetTaskId: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -43,6 +45,8 @@ export const taskSchema = z.object({
   status: z.enum(taskStatuses),
   percentComplete: z.number().int().min(0).max(100),
   isExpanded: z.boolean(),
+  forecastNeedsReview: z.boolean().default(false),
+  forecastLocked: z.boolean().default(false),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -93,7 +97,10 @@ export const projectCreateSchema = z.object({
   description: z.string().max(1000).default(""),
 });
 
-export const projectUpdateSchema = projectCreateSchema.partial().refine(
+export const projectUpdateSchema = projectCreateSchema.partial().extend({
+  autoSchedule: z.boolean().optional(),
+  reportingTargetTaskId: z.string().nullable().optional(),
+}).refine(
   (value) => Object.keys(value).length > 0,
   "At least one field is required.",
 );
@@ -124,6 +131,7 @@ export const taskUpdateSchema = z
     actualEnd: z.string().nullable().optional(),
     percentComplete: z.number().int().min(0).max(100).optional(),
     isExpanded: z.boolean().optional(),
+    forecastLocked: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, "At least one field is required.");
 

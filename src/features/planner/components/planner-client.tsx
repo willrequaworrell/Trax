@@ -19,6 +19,7 @@ import {
 } from "@phosphor-icons/react";
 import { format, isWeekend, parseISO } from "date-fns";
 
+import { deploymentForecast, forecastMovements } from "@/domain/forecast-report";
 import { computeCheckpointPercent } from "@/domain/checkpoints";
 import type { Checkpoint, PlannedTask, Project, ProjectPlan, TaskType } from "@/domain/planner";
 import { addDurationToStart, isoToday, shiftBusinessDays } from "@/domain/date-utils";
@@ -502,6 +503,16 @@ function pendingUndoTitle(action: ProjectPlan["pendingUndoActions"][number]) {
 
 export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [plan, setPlan] = useState(initialPlan);
+  const planRef = useRef(initialPlan);
+  const forecastRefreshPending = useRef(false);
+  const [movements, setMovements] = useState<ReturnType<typeof forecastMovements>>({});
+  const [forecastSettingsOpen, setForecastSettingsOpen] = useState(false);
+  const [forecastSettingsPending, setForecastSettingsPending] = useState(false);
+  const [autoScheduleDraft, setAutoScheduleDraft] = useState(initialPlan.project.autoSchedule);
+  const [targetDraft, setTargetDraft] = useState(initialPlan.project.reportingTargetTaskId ?? "");
+  const [schedulePreview, setSchedulePreview] = useState<ProjectPlan | null>(null);
+  const forecast = useMemo(() => deploymentForecast(plan), [plan]);
+  const previewMovements = useMemo(() => schedulePreview ? forecastMovements(plan, schedulePreview) : {}, [plan, schedulePreview]);
   const [projects, setProjects] = useState(initialProjects);
   const [view, setView] = useState<ViewMode>("list");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -531,7 +542,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   const [pendingCheckpointIds, setPendingCheckpointIds] = useState<Record<string, boolean>>({});
   const [hoveredDependencyTaskId, setHoveredDependencyTaskId] = useState<string | null>(null);
   const [ganttViewportWidth, setGanttViewportWidth] = useState(0);
-  const [ganttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
+  const [preferredGanttColumnWidth, setGanttColumnWidth] = useState(GANTT_DEFAULT_COLUMN_WIDTH);
   const [showBaselineBars, setShowBaselineBars] = useState(Boolean(initialPlan.project.baselineCapturedAt));
   const [baselineGateOpen, setBaselineGateOpen] = useState(false);
   const [baselineGatePending, setBaselineGatePending] = useState(false);
@@ -597,13 +608,16 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     timeline.length > 0 && ganttTimelineViewportWidth > 0
       ? ganttTimelineViewportWidth / timeline.length
       : GANTT_DEFAULT_COLUMN_WIDTH;
+  const ganttColumnWidth = Math.min(GANTT_MAX_COLUMN_WIDTH, Math.max(minGanttColumnWidth, preferredGanttColumnWidth));
   const ganttTimelineWidth =
     timeline.length > 0 ? timeline.length * ganttColumnWidth : Math.max(ganttTimelineViewportWidth, 720);
 
   useEffect(() => {
-    const persisted = readExpandedMap(plan.project.id);
-    setExpandedMap(buildExpandedMap(plan.tasks, persisted));
-  }, [plan.project.id, plan.tasks]);
+    const persisted = readExpandedMap(initialPlan.project.id);
+    // Restore browser-only preferences after hydration; server and initial client markup must match.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setExpandedMap(buildExpandedMap(initialPlan.tasks, persisted));
+  }, [initialPlan]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -616,14 +630,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       // Ignore storage failures and keep expansion state local to memory.
     }
   }, [expandedMap, plan.project.id]);
-
-  useEffect(() => {
-    setRebaseStartDate(earliestForecastStart);
-  }, [earliestForecastStart, plan.project.id]);
-
-  useEffect(() => {
-    setShowBaselineBars(Boolean(plan.project.baselineCapturedAt));
-  }, [plan.project.baselineCapturedAt, plan.project.id]);
 
   useEffect(() => {
     const nextToastIds = new Set<string>();
@@ -680,12 +686,6 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
     return () => resizeObserver.disconnect();
   }, [view]);
 
-  useEffect(() => {
-    setGanttColumnWidth((current) => {
-      const clamped = Math.min(GANTT_MAX_COLUMN_WIDTH, Math.max(minGanttColumnWidth, current));
-      return Math.abs(clamped - current) < 0.1 ? current : clamped;
-    });
-  }, [minGanttColumnWidth]);
 
   function markTaskPending(taskId: string, pending: boolean) {
     setPendingTaskIds((current) => {
@@ -744,6 +744,13 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
   }
 
   function applyPlan(nextPlan: ProjectPlan) {
+    const changes = forecastMovements(planRef.current, nextPlan);
+    if (Object.keys(changes).length > 0) setMovements(changes);
+    if (planRef.current.project.baselineCapturedAt !== nextPlan.project.baselineCapturedAt) {
+      setShowBaselineBars(Boolean(nextPlan.project.baselineCapturedAt));
+    }
+    setExpandedMap((current) => buildExpandedMap(nextPlan.tasks, current));
+    planRef.current = nextPlan;
     setPlan(nextPlan);
     setProjects((current) => {
       const existing = current.find((project) => project.id === nextPlan.project.id);
@@ -759,6 +766,81 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       );
     });
   }
+
+  function movementBadge(delta: number | undefined) {
+    if (!delta) return null;
+    return <span className={cn("shrink-0 rounded px-1 text-[11px] font-medium", delta < 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}
+      title={`${Math.abs(delta)} business days ${delta < 0 ? "earlier" : "later"} than before the last schedule change`}
+      aria-label={`${Math.abs(delta)} business days ${delta < 0 ? "earlier" : "later"}`}>
+      {delta < 0 ? "←" : "→"} {Math.abs(delta)}d
+    </span>;
+  }
+
+  function openForecastSettings() {
+    setAutoScheduleDraft(plan.project.autoSchedule);
+    setTargetDraft(plan.project.reportingTargetTaskId ?? "");
+    setSchedulePreview(null);
+    setForecastSettingsOpen(true);
+  }
+
+  async function previewSchedule(enabled: boolean) {
+    setAutoScheduleDraft(enabled);
+    setSchedulePreview(null);
+    if (!enabled || plan.project.autoSchedule) return;
+    setForecastSettingsPending(true);
+    try {
+      setSchedulePreview(await requestPlan(`/api/projects/${plan.project.id}/schedule-preview`));
+    } catch (error) {
+      setAutoScheduleDraft(false);
+      toast.error(error instanceof Error ? error.message : "Failed to preview schedule.");
+    } finally { setForecastSettingsPending(false); }
+  }
+
+  async function saveForecastSettings() {
+    setForecastSettingsPending(true);
+    try {
+      const nextPlan = await requestPlan(`/api/projects/${plan.project.id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoSchedule: autoScheduleDraft, reportingTargetTaskId: targetDraft || null }),
+      });
+      if (nextPlan) applyPlan(nextPlan);
+      setForecastSettingsOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save forecast settings.");
+    } finally { setForecastSettingsPending(false); }
+  }
+
+  const refreshForecast = useEffectEvent(async () => {
+    if (forecastRefreshPending.current || forecastSettingsOpen || dialogState.open || rebaseOpen || reflowOpen || renameOpen ||
+        baselineGateOpen || actualStartGateOpen || actualEndGateOpen || checkpointEdit || activeCell || activeCheckpointCell ||
+        Object.keys(pendingTaskIds).length || Object.keys(pendingCheckpointIds).length ||
+        Object.keys(checkpointDrafts).length || Object.keys(progressDrafts).length) return false;
+    const previous = planRef.current;
+    forecastRefreshPending.current = true;
+    try {
+      const refreshed = await requestPlan(`/api/projects/${previous.project.id}`, { cache: "no-store" });
+      if (refreshed && previous === planRef.current) { applyPlan(refreshed); return true; }
+      return false;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to refresh forecast.");
+      return false;
+    } finally { forecastRefreshPending.current = false; }
+  });
+
+  useEffect(() => {
+    let statusDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+    const onFocus = () => { void refreshForecast(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") void refreshForecast(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setInterval(() => {
+      const nextDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+      if (nextDate !== statusDate && document.visibilityState === "visible") {
+        void refreshForecast().then((refreshed) => { if (refreshed) statusDate = nextDate; });
+      }
+    }, 60_000);
+    return () => { window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onVisibility); window.clearInterval(timer); };
+  }, []);
 
   async function requestPlan(input: RequestInfo, init?: RequestInit) {
     const response = await fetch(input, init);
@@ -1531,6 +1613,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   disabled={isTaskPending}
                 >
                   <span className={cn("shrink-0 whitespace-nowrap", valueClass)}>{formatCompactDate(displayValue)}</span>
+                  {movementBadge(field === "start" ? movements[task.id]?.start : movements[task.id]?.end)}
                 </button>
               </TooltipTrigger>
               <TooltipContent className="border-neutral-800 bg-neutral-950 text-white">{tooltipContent}</TooltipContent>
@@ -1838,7 +1921,10 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Blocking</p>
-                  {task.blocking.length > 0 ? (
+                  <DropdownMenuItem onClick={() => void patchTask(task, { forecastLocked: !task.forecastLocked })}>
+                  {task.forecastLocked ? "Allow forecast to move" : "Keep forecast dates fixed"}
+                </DropdownMenuItem>
+                {task.blocking.length > 0 ? (
                     task.blocking.map((dependency) => {
                       const successor = taskMap.get(dependency.successorTaskId);
 
@@ -2312,6 +2398,13 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </TooltipProvider>
               ) : null}
             </div>
+            {task.issues.some((issue) => issue.id === `forecast-review-${task.id}`) ? (
+              <button type="button" className="block text-xs font-medium text-amber-700 underline"
+                onClick={(event) => { event.stopPropagation(); setActiveCell({ taskId: task.id, field: "due" }); }}>
+                Update expected finish
+              </button>
+            ) : null}
+            {task.forecastLocked ? <span className="text-xs text-muted-foreground">Fixed dates</span> : null}
             {task.type === "summary" ? (
               task.notes ? <p className="truncate text-xs text-muted-foreground" title={task.notes}>{task.notes}</p> : null
             ) : (
@@ -2460,7 +2553,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </button>
               <p className="truncate text-xs text-muted-foreground">
                 {timelineSubtitle(task)}
+                {movementBadge(movements[task.id]?.end || movements[task.id]?.start)}
               </p>
+              {task.issues.length > 0 ? <span className="text-xs text-amber-700" title={task.issues.map((issue) => issue.message).join(" • ")}>⚠ {task.issues.some((issue) => issue.id === `forecast-review-${task.id}`) ? "Update expected finish" : "Review warnings"}</span> : null}
             </div>
           </div>
 
@@ -2677,7 +2772,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => setRebaseOpen(true)}>Rebase schedule</DropdownMenuItem>
+                      <DropdownMenuItem onClick={openForecastSettings}>Forecast settings</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { setRebaseStartDate(earliestForecastStart); setRebaseOpen(true); }}>Rebase schedule</DropdownMenuItem>
                       <DropdownMenuItem onClick={() => void freezeBaseline()}>
                         {plan.project.baselineCapturedAt ? "Reset baseline" : "Freeze baseline"}
                       </DropdownMenuItem>
@@ -2705,6 +2801,14 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </div>
                 <div className="mt-1 flex items-center gap-3">
                   <Badge variant="outline">{plan.projectPercentComplete}% complete</Badge>
+                  {forecast.target ? <span className="inline-flex items-center gap-1.5 text-xs" title={forecast.target.name}>
+                    Deployment <strong>{formatCompactDate(forecast.date)}</strong>
+                    {movementBadge(movements[forecast.target.id]?.end)}
+                    {forecast.variance !== null ? <span className="text-muted-foreground">({forecast.variance > 0 ? "+" : ""}{forecast.variance}d vs baseline)</span> : null}
+                    {forecast.needsReview ? <Badge variant="outline" className="text-amber-700">Forecast needs review</Badge> : null}
+                  </span> : <button type="button" className="text-xs text-muted-foreground underline" onClick={openForecastSettings}>Choose deployment target</button>}
+                  {plan.project.autoSchedule ? <span className="text-xs text-muted-foreground">Auto schedule</span> : null}
+                  {Object.keys(movements).length > 0 ? <button type="button" className="text-xs text-muted-foreground underline" onClick={() => setMovements({})}>Clear arrows</button> : null}
                 </div>
               </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -2765,8 +2869,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                   ) : null}
                   {view === "gantt" ? (
                     <>
-                      <DropdownMenuItem disabled={!canZoomOut} onClick={() => setGanttColumnWidth((current) => Math.max(minGanttColumnWidth, current - GANTT_ZOOM_STEP))}><Minus />Zoom out</DropdownMenuItem>
-                      <DropdownMenuItem disabled={!canZoomIn} onClick={() => setGanttColumnWidth((current) => Math.min(GANTT_MAX_COLUMN_WIDTH, current + GANTT_ZOOM_STEP))}><Plus />Zoom in</DropdownMenuItem>
+                      <DropdownMenuItem disabled={!canZoomOut} onClick={() => setGanttColumnWidth(Math.max(minGanttColumnWidth, ganttColumnWidth - GANTT_ZOOM_STEP))}><Minus />Zoom out</DropdownMenuItem>
+                      <DropdownMenuItem disabled={!canZoomIn} onClick={() => setGanttColumnWidth(Math.min(GANTT_MAX_COLUMN_WIDTH, ganttColumnWidth + GANTT_ZOOM_STEP))}><Plus />Zoom in</DropdownMenuItem>
                       <DropdownMenuItem disabled={!plan.project.baselineCapturedAt} onClick={() => setShowBaselineBars((current) => !current)}>{showBaselineBars ? "Hide baseline" : "Show baseline"}</DropdownMenuItem>
                     </>
                   ) : null}
@@ -2888,12 +2992,49 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         </section>
       </main>
 
+      <DialogRoot open={forecastSettingsOpen} onOpenChange={(open) => { if (!forecastSettingsPending) setForecastSettingsOpen(open); }}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Forecast settings</DialogTitle>
+            <DialogDescription>Choose the date you report and how dependent work moves.</DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <label className="block space-y-2 text-sm">
+              <span>Deployment target</span>
+              <select className="w-full rounded-lg border bg-background px-3 py-2" value={targetDraft} onChange={(event) => setTargetDraft(event.target.value)}>
+                <option value="">No target selected</option>
+                {plan.tasks.filter((task) => !task.isSummary).map((task) => <option key={task.id} value={task.id}>{task.name}</option>)}
+              </select>
+            </label>
+            <label className="flex items-start gap-3 text-sm">
+              <input type="checkbox" className="mt-1" checked={autoScheduleDraft} disabled={forecastSettingsPending} onChange={(event) => void previewSchedule(event.target.checked)} />
+              <span><strong>Automatically schedule downstream work</strong><span className="mt-1 block text-muted-foreground">Move unstarted dependent work earlier or later using current duration estimates. Actual dates, fixed forecast dates, and baseline stay intact.</span></span>
+            </label>
+            {forecastSettingsPending ? <p className="flex items-center gap-2 text-sm"><Spinner />Calculating…</p> : null}
+            {schedulePreview ? <div className="space-y-2">
+              <p className="text-sm font-medium">{Object.keys(previewMovements).filter((id) => !taskMap.get(id)?.isSummary).length} tasks will move</p>
+              <div className="max-h-56 overflow-auto rounded-lg border">
+                {schedulePreview.tasks.filter((task) => !task.isSummary && previewMovements[task.id]).map((task) => <div key={task.id} className="flex items-center justify-between gap-3 border-b px-3 py-2 text-xs">
+                  <span className="truncate">{task.name}</span>
+                  <span className="flex shrink-0 items-center gap-2">{formatCompactDate(taskMap.get(task.id)?.computedPlannedEnd ?? null)} → {formatCompactDate(task.computedPlannedEnd)} {movementBadge(previewMovements[task.id].end || previewMovements[task.id].start)}</span>
+                </div>)}
+              </div>
+            </div> : null}
+            <p className="text-xs text-muted-foreground">Use a task’s menu to keep an intentional date fixed. For overdue unfinished work, update expected finish; checkpoint progress alone does not estimate remaining time. Record additional work in your rework sections and link it to deployment.</p>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" disabled={forecastSettingsPending} onClick={() => setForecastSettingsOpen(false)}>Cancel</Button>
+            <Button disabled={forecastSettingsPending || (autoScheduleDraft && !plan.project.autoSchedule && !schedulePreview)} onClick={() => void saveForecastSettings()}>Save forecast settings</Button>
+          </DialogFooter>
+        </DialogContent>
+      </DialogRoot>
+
       <DialogRoot open={rebaseOpen} onOpenChange={setRebaseOpen}>
         <DialogContent className="max-w-xl">
           <DialogHeader>
             <DialogTitle>Rebase schedule</DialogTitle>
             <DialogDescription>
-              Shift the whole forecast so the earliest planned task starts on a new date. Baseline and actual progress stay unchanged.
+              Shift the forecast so the earliest planned task starts on a new date. Fixed dates, baseline, and actual progress stay unchanged.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -3285,6 +3426,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
       />
 
       <TaskDialog
+        key={`${dialogState.open}-${dialogState.mode}-${dialogState.taskId}-${dialogState.parentId}-${dialogState.type}`}
         open={dialogState.open}
         mode={dialogState.mode}
         projectId={plan.project.id}

@@ -6,6 +6,8 @@ export const projects = pgTable("projects", {
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
   baselineCapturedAt: text("baseline_captured_at"),
+  autoSchedule: boolean("auto_schedule").notNull().default(false),
+  reportingTargetTaskId: text("reporting_target_task_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -34,6 +36,8 @@ export const tasks = pgTable(
     status: text("status").notNull().default("not_started"),
     percentComplete: integer("percent_complete").notNull().default(0),
     isExpanded: boolean("is_expanded").notNull().default(true),
+    forecastNeedsReview: boolean("forecast_needs_review").notNull().default(false),
+    forecastLocked: boolean("forecast_locked").notNull().default(false),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

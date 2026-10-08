@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { deploymentForecast, forecastMovements } from "@/domain/forecast-report";
 import { computeProjectPlan } from "@/domain/scheduler";
 import type { Checkpoint, Dependency, Project, Task } from "@/domain/planner";
 
@@ -10,6 +11,8 @@ function makeProject(): Project {
     name: "Planner",
     description: "",
     baselineCapturedAt: null,
+    autoSchedule: false,
+    reportingTargetTaskId: null,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
   };
@@ -34,6 +37,8 @@ function makeTask(task: Partial<Task> & Pick<Task, "id" | "name">): Task {
     status: "not_started",
     percentComplete: 0,
     isExpanded: true,
+    forecastNeedsReview: false,
+    forecastLocked: false,
     createdAt: "2026-03-18T00:00:00.000Z",
     updatedAt: "2026-03-18T00:00:00.000Z",
     ...task,
@@ -434,4 +439,34 @@ test("sorts siblings by computed forecast start when stored starts are stale", (
   assert.equal(blocked?.computedPlannedStart, "2026-03-19");
   assert.equal(free?.computedPlannedStart, "2026-03-17");
   assert.deepEqual(summary?.childIds, ["anchor", "free", "blocked"]);
+});
+
+
+test("deployment review follows only its prerequisites and warns about disconnected tasks and empty sections", () => {
+  const project = { ...makeProject(), baselineCapturedAt: "2026-03-16T12:00:00Z", reportingTargetTaskId: "deployment" };
+  const tasks = [
+    makeTask({ id: "dev", name: "Development", forecastNeedsReview: true }),
+    makeTask({ id: "deployment", name: "Deployment", type: "milestone", plannedStart: "2026-03-20", baselinePlannedStart: "2026-03-23" }),
+    makeTask({ id: "followup", name: "Follow-up", forecastNeedsReview: true }),
+    makeTask({ id: "empty", name: "Empty", type: "summary" }),
+  ];
+  const dependencies = [makeDependency({ id: "link", predecessorTaskId: "dev", successorTaskId: "deployment" })];
+  const plan = computeProjectPlan({ project, tasks, dependencies, checkpoints: [], statusDate: "2026-03-16" });
+  const report = deploymentForecast(plan);
+  assert.equal(report.needsReview, true);
+  assert.deepEqual(report.reviewTasks.map((task) => task.id), ["dev"]);
+  assert.equal(report.variance, -1);
+  assert.ok(plan.tasks.find((task) => task.id === "followup")!.issues.some((issue) => issue.message === "Not linked to deployment"));
+  assert.ok(plan.tasks.find((task) => task.id === "empty")!.issues.some((issue) => issue.message === "Empty section"));
+  const revised = computeProjectPlan({ project, tasks: tasks.map((task) => task.id === "dev" ? { ...task, forecastNeedsReview: false } : task), dependencies, checkpoints: [], statusDate: "2026-03-16" });
+  assert.equal(deploymentForecast(revised).needsReview, false);
+});
+
+test("date movement indicators capture both earlier and later business-day changes", () => {
+  const snapshot = { project: makeProject(), tasks: [makeTask({ id: "a", name: "A", plannedStart: "2026-10-19" })], dependencies: [], checkpoints: [] };
+  const previous = computeProjectPlan(snapshot);
+  const earlier = computeProjectPlan({ ...snapshot, tasks: [{ ...snapshot.tasks[0], plannedStart: "2026-10-15" }] });
+  const later = computeProjectPlan({ ...snapshot, tasks: [{ ...snapshot.tasks[0], plannedStart: "2026-10-21" }] });
+  assert.deepEqual(forecastMovements(previous, earlier).a, { start: -2, end: -2 });
+  assert.deepEqual(forecastMovements(previous, later).a, { start: 2, end: 2 });
 });

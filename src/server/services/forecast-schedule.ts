@@ -13,6 +13,7 @@ import { ValidationError } from "@/server/errors";
 type Snapshot = {
   tasks: Task[];
   dependencies: Dependency[];
+  project?: { autoSchedule: boolean; baselineCapturedAt: string | null };
 };
 
 function isLeafTask(task: Task) {
@@ -250,7 +251,7 @@ export function resolveForecastAnchorTask(tasks: Task[]) {
 
 export function shiftForecastTasks(tasks: Task[], offset: number) {
   return tasks.map((task) => {
-    if (!isLeafTask(task) || !task.plannedStart || task.actualStart || task.actualEnd) {
+    if (!isLeafTask(task) || !task.plannedStart || task.forecastLocked || task.actualStart || task.actualEnd) {
       return task;
     }
 
@@ -284,6 +285,7 @@ export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string)
     if (
       !task ||
       !isLeafTask(task) ||
+      task.forecastLocked ||
       task.actualEnd ||
       task.percentComplete >= 100
     ) {
@@ -303,6 +305,7 @@ export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string)
 
       taskMap.set(taskId, {
         ...task,
+        forecastNeedsReview: true,
         plannedMode: "start_duration",
         plannedStart: normalizedStatusDate,
         plannedEnd: null,
@@ -318,6 +321,7 @@ export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string)
 
       taskMap.set(taskId, {
         ...task,
+        forecastNeedsReview: true,
         plannedStart: fixedStart,
         plannedEnd: task.plannedMode === "start_end" ? normalizedStatusDate : null,
         plannedDurationDays: expandedDuration,
@@ -329,6 +333,7 @@ export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string)
     const durationDays = deriveForecastDuration(task);
     taskMap.set(taskId, {
       ...task,
+      forecastNeedsReview: true,
       plannedStart: normalizedStatusDate,
       plannedEnd:
         task.plannedMode === "start_end"
@@ -347,7 +352,7 @@ export function reconcileOverdueForecast(snapshot: Snapshot, statusDate: string)
   return cascadeForecastFromSeeds(
     { ...snapshot, tasks: correctedTasks },
     changedTaskIds,
-    { includeSeeds: true },
+    { includeSeeds: true, automatic: snapshot.project?.autoSchedule, statusDate: normalizedStatusDate },
   );
 }
 
@@ -386,7 +391,7 @@ export function reflowDownstreamForecast(snapshot: Snapshot, anchorTaskId: strin
   for (const taskId of order) {
     const task = taskMap.get(taskId);
 
-    if (!task || !isLeafTask(task) || task.actualStart || task.actualEnd || task.percentComplete > 0) {
+    if (!task || !isLeafTask(task) || task.forecastLocked || task.actualStart || task.actualEnd || task.percentComplete > 0) {
       continue;
     }
 
@@ -453,7 +458,7 @@ export function reflowDownstreamForecast(snapshot: Snapshot, anchorTaskId: strin
 export function cascadeForecastFromSeeds(
   snapshot: Snapshot,
   seedTaskIds: string[],
-  options: { includeSeeds?: boolean } = {},
+  options: { includeSeeds?: boolean; automatic?: boolean; statusDate?: string } = {},
 ) {
   const affectedIds = collectSuccessorClosure(snapshot.dependencies, seedTaskIds, options.includeSeeds);
 
@@ -462,6 +467,9 @@ export function cascadeForecastFromSeeds(
   }
 
   const order = topologicalLeafOrder(snapshot.tasks, snapshot.dependencies).filter((taskId) => affectedIds.has(taskId));
+  if (options.automatic && order.length !== affectedIds.size) {
+    throw new ValidationError("Forecast could not be scheduled because the affected dependencies contain a cycle or invalid task.");
+  }
   const taskMap = new Map(snapshot.tasks.map((task) => [task.id, { ...task }]));
   const { bySuccessor } = buildDependencyIndex(snapshot.dependencies);
 
@@ -472,7 +480,7 @@ export function cascadeForecastFromSeeds(
       continue;
     }
 
-    if (task.actualStart || task.actualEnd || task.percentComplete >= 100) {
+    if (task.forecastLocked || task.actualStart || task.actualEnd || task.percentComplete >= 100 || (options.automatic && task.percentComplete > 0)) {
       continue;
     }
 
@@ -514,7 +522,13 @@ export function cascadeForecastFromSeeds(
       }
     }
 
-    const nextStart = resolveTaskStart(task, durationDays, requiredStart, requiredEnd);
+    const earliestByEnd = requiredEnd && durationDays > 0
+      ? shiftBusinessDays(requiredEnd, -(durationDays - 1))
+      : requiredEnd;
+    const dependencyStart = maxIsoDate([requiredStart, earliestByEnd]);
+    const nextStart = options.automatic && dependencyStart
+      ? clampToBusinessDay(maxIsoDate([dependencyStart, options.statusDate])!)
+      : resolveTaskStart(task, durationDays, requiredStart, requiredEnd);
 
     if (!nextStart) {
       continue;

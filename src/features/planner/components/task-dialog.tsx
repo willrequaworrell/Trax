@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { FlowArrow, Link as LinkIcon, Trash } from "@phosphor-icons/react";
 
@@ -211,19 +211,6 @@ export function TaskDialog({
     [parentId, tasks],
   );
 
-  useEffect(() => {
-    setDraft(toDraft(task, parentId, type));
-    setDependencyDraft({
-      mode: "blockedBy",
-      taskId: "",
-      type: "FS",
-      lagDays: 0,
-    });
-    setPendingDependencies([]);
-    setActualStartDraft(task?.actualStart ?? task?.plannedStart ?? task?.computedPlannedStart ?? isoToday());
-    setActualEndDraft(task?.actualEnd ?? task?.computedPlannedEnd ?? isoToday());
-  }, [mode, parentId, task, type, createParentLocked]);
-
   function openBaselineGate(action: () => Promise<void>) {
     baselineGateActionRef.current = action;
     setBaselineGateOpen(true);
@@ -298,10 +285,14 @@ export function TaskDialog({
     };
 
     if (mode === "edit" && task) {
+      // Send only changed fields so editing notes cannot acknowledge an overdue forecast.
+      const patch = Object.fromEntries(Object.entries(payload).filter(([key, value]) =>
+        value !== task[key as keyof PlannedTask]));
+      if (Object.keys(patch).length === 0) { onOpenChange(false); return; }
       const nextPlan = (await requestJson(`/api/tasks/${task.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(patch),
       })) as ProjectPlan;
 
       onPlanChange(nextPlan);
