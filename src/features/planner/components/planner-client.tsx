@@ -2164,7 +2164,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                           <div className="flex items-center justify-between">
                             <span className="text-sm font-medium">{percentComplete}%</span>
                             <Button
-                              size="icon-xs"
+                              size="xs"
+                              className="hover:bg-emerald-600 hover:text-white focus-visible:bg-emerald-600 focus-visible:text-white"
                               disabled={isPending || !canSave}
                               onClick={() => {
                                 setActiveCheckpointCell(null);
@@ -2172,6 +2173,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                               }}
                             >
                               {isPending ? <Spinner /> : <Check className="size-3.5" />}
+                              {percentComplete >= 100 ? "Complete" : "Save progress"}
                             </Button>
                           </div>
                           <SliderRoot
@@ -2185,8 +2187,20 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                             <SliderTrack>
                               <SliderRange />
                             </SliderTrack>
-                            <SliderThumb />
+                            <SliderThumb aria-label={`${checkpoint.name} progress`} />
                           </SliderRoot>
+                          <div className="relative mx-2 h-7" aria-hidden="true">
+                            {[0, 25, 50, 75, 100].map((percent) => (
+                              <span
+                                key={percent}
+                                className="absolute flex -translate-x-1/2 flex-col items-center gap-1 text-[10px] text-muted-foreground"
+                                style={{ left: `${percent}%` }}
+                              >
+                                <span className="h-1.5 w-px bg-border" />
+                                <span>{percent}%</span>
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </PopoverContent>
                     </PopoverRoot>
