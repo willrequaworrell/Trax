@@ -1921,10 +1921,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Blocking</p>
-                  <DropdownMenuItem onClick={() => void patchTask(task, { forecastLocked: !task.forecastLocked })}>
-                  {task.forecastLocked ? "Allow forecast to move" : "Keep forecast dates fixed"}
-                </DropdownMenuItem>
-                {task.blocking.length > 0 ? (
+                  {task.blocking.length > 0 ? (
                     task.blocking.map((dependency) => {
                       const successor = taskMap.get(dependency.successorTaskId);
 
@@ -2029,6 +2026,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
               </>
             ) : (
               <>
+                <DropdownMenuItem onClick={() => void patchTask(task, { forecastLocked: !task.forecastLocked })}>
+                  {task.forecastLocked ? "Allow forecast to move" : "Keep forecast dates fixed"}
+                </DropdownMenuItem>
                 {task.type === "task" ? (
                   <>
                     <DropdownMenuItem onClick={() => void createCheckpointForTask(task)}>Add checkpoint</DropdownMenuItem>
