@@ -1,5 +1,7 @@
 import type { Checkpoint } from "@/domain/planner";
 
+export const MAX_CHECKPOINT_WEIGHT_POINTS = 100;
+
 export function computeCheckpointPercent(checkpoints: Array<Pick<Checkpoint, "percentComplete" | "weightPoints">>) {
   if (checkpoints.length === 0) {
     return 0;

@@ -1078,6 +1078,29 @@ test("derives task progress from checkpoints while keeping task schedule fields"
   assert.equal(plannedTask?.checkpoints.length, 2);
 });
 
+test("checkpoints support weights through 100 and progress updates preserve their weight", async () => {
+  const plan = await makeProject("large-checkpoint-weights");
+  const task = await projectService.createTask(plan.project.id, { name: "Build", type: "task" });
+  assert.ok(task);
+  await projectService.freezeProjectBaseline(plan.project.id);
+  await projectService.updateTask(task.taskId, { actualStart: "2026-03-16" });
+
+  const created = await projectService.createCheckpoint(task.taskId, {
+    name: "Build component", weightPoints: 15,
+  });
+  const checkpoint = created?.tasks.find((item) => item.id === task.taskId)?.checkpoints[0];
+  assert.ok(checkpoint);
+  const progressed = await projectService.updateCheckpoint(checkpoint.id, { percentComplete: 50 });
+  const saved = progressed?.tasks.find((item) => item.id === task.taskId)?.checkpoints[0];
+  assert.equal(saved?.percentComplete, 50);
+  assert.equal(saved?.weightPoints, 15);
+
+  const reweighted = await projectService.updateCheckpoint(checkpoint.id, { weightPoints: 100 });
+  assert.equal(reweighted?.tasks.find((item) => item.id === task.taskId)?.checkpoints[0].weightPoints, 100);
+  await assert.rejects(projectService.updateCheckpoint(checkpoint.id, { weightPoints: 101 }));
+  await assert.rejects(projectService.createCheckpoint(task.taskId, { name: "Too large", weightPoints: 101 }));
+});
+
 test("lowering checkpoint progress clears the parent task actual end", async () => {
   const plan = await makeProject("checkpoint-reopens-parent-task");
   const task = await projectService.createTask(plan.project.id, {
