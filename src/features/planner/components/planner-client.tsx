@@ -20,7 +20,7 @@ import {
 import { format, isWeekend, parseISO } from "date-fns";
 
 import { deploymentForecast, forecastMovements } from "@/domain/forecast-report";
-import { computeCheckpointPercent } from "@/domain/checkpoints";
+import { computeCheckpointPercent, MAX_CHECKPOINT_WEIGHT_POINTS } from "@/domain/checkpoints";
 import type { Checkpoint, PlannedTask, Project, ProjectPlan, TaskType } from "@/domain/planner";
 import { addDurationToStart, isoToday, shiftBusinessDays } from "@/domain/date-utils";
 import { DatePickerField } from "@/features/planner/components/date-picker-field";
@@ -1366,9 +1366,13 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: draft.name.trim(),
-          percentComplete: Number(draft.percentComplete),
-          weightPoints: Number(draft.weightPoints),
+          ...(draft.name.trim() !== checkpoint.name ? { name: draft.name.trim() } : {}),
+          ...(Number(draft.percentComplete) !== checkpoint.percentComplete
+            ? { percentComplete: Number(draft.percentComplete) }
+            : {}),
+          ...(Number(draft.weightPoints) !== checkpoint.weightPoints
+            ? { weightPoints: Number(draft.weightPoints) }
+            : {}),
         }),
       });
 
@@ -2087,9 +2091,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
             const canSave =
               isChanged &&
               Boolean(draft.name.trim()) &&
-              Number.isFinite(weightPoints) &&
-              weightPoints >= 1 &&
-              weightPoints <= 8;
+              (weightPoints === checkpoint.weightPoints ||
+                (Number.isInteger(weightPoints) && weightPoints >= 1 && weightPoints <= MAX_CHECKPOINT_WEIGHT_POINTS));
 
             return (
               <div
@@ -2164,7 +2167,8 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                           <div className="flex items-center justify-between">
                             <span className="text-sm font-medium">{percentComplete}%</span>
                             <Button
-                              size="icon-xs"
+                              size="xs"
+                              className="hover:bg-emerald-600 hover:text-white focus-visible:bg-emerald-600 focus-visible:text-white"
                               disabled={isPending || !canSave}
                               onClick={() => {
                                 setActiveCheckpointCell(null);
@@ -2172,6 +2176,7 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                               }}
                             >
                               {isPending ? <Spinner /> : <Check className="size-3.5" />}
+                              {percentComplete >= 100 ? "Complete" : "Save progress"}
                             </Button>
                           </div>
                           <SliderRoot
@@ -2185,8 +2190,20 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                             <SliderTrack>
                               <SliderRange />
                             </SliderTrack>
-                            <SliderThumb />
+                            <SliderThumb aria-label={`${checkpoint.name} progress`} />
                           </SliderRoot>
+                          <div className="relative mx-2 h-7" aria-hidden="true">
+                            {[0, 25, 50, 75, 100].map((percent) => (
+                              <span
+                                key={percent}
+                                className="absolute flex -translate-x-1/2 flex-col items-center gap-1 text-[10px] text-muted-foreground"
+                                style={{ left: `${percent}%` }}
+                              >
+                                <span className="h-1.5 w-px bg-border" />
+                                <span>{percent}%</span>
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </PopoverContent>
                     </PopoverRoot>
@@ -2243,9 +2260,9 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                             </Button>
                           </div>
                           <SliderRoot
-                            value={[Math.max(1, Math.min(8, Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints))]}
+                            value={[Math.max(1, Math.min(MAX_CHECKPOINT_WEIGHT_POINTS, Number.isFinite(weightPoints) ? weightPoints : checkpoint.weightPoints))]}
                             min={1}
-                            max={8}
+                            max={MAX_CHECKPOINT_WEIGHT_POINTS}
                             step={1}
                             onValueChange={(value) => setCheckpointDraft(checkpoint.id, { weightPoints: String(value[0] ?? 1) })}
                             disabled={isPending}
@@ -2253,11 +2270,11 @@ export function PlannerClient({ initialPlan, initialProjects }: Props) {
                             <SliderTrack>
                               <SliderRange />
                             </SliderTrack>
-                            <SliderThumb />
+                            <SliderThumb aria-label={`${checkpoint.name} weight points`} />
                           </SliderRoot>
                           <div className="flex justify-between text-[11px] text-muted-foreground">
                             <span>1</span>
-                            <span>8</span>
+                            <span>{MAX_CHECKPOINT_WEIGHT_POINTS}</span>
                           </div>
                         </div>
                       </PopoverContent>

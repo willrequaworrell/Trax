@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_CHECKPOINT_WEIGHT_POINTS } from "@/domain/checkpoints";
 
 export const taskTypes = ["summary", "task", "milestone"] as const;
 export const taskStatuses = ["not_started", "in_progress", "done"] as const;
@@ -67,7 +68,7 @@ export const checkpointSchema = z.object({
   taskId: z.string(),
   name: z.string().min(1),
   percentComplete: z.number().int().min(0).max(100),
-  weightPoints: z.number().int().min(1).max(8),
+  weightPoints: z.number().int().min(1).max(MAX_CHECKPOINT_WEIGHT_POINTS),
   sortOrder: z.number().int(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -142,14 +143,14 @@ export const taskWrapSchema = z.object({
 export const checkpointCreateSchema = z.object({
   name: z.string().min(1).max(160),
   percentComplete: z.number().int().min(0).max(100).default(0),
-  weightPoints: z.number().int().min(1).max(8).default(1),
+  weightPoints: z.number().int().min(1).max(MAX_CHECKPOINT_WEIGHT_POINTS).default(1),
 });
 
 export const checkpointUpdateSchema = z
   .object({
     name: z.string().min(1).max(160).optional(),
     percentComplete: z.number().int().min(0).max(100).optional(),
-    weightPoints: z.number().int().min(1).max(8).optional(),
+    weightPoints: z.number().int().min(1).max(MAX_CHECKPOINT_WEIGHT_POINTS).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, "At least one field is required.");
 
